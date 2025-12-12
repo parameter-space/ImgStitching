@@ -282,6 +282,8 @@ def ransac_homography(points1: np.ndarray, points2: np.ndarray,
             H = compute_homography_4points(sample_p1, sample_p2)
             
             # 3. 모든 점에 대해 재투영 오차 계산
+            # H는 points1을 points2로 변환하는 Homography이므로
+            # compute_reprojection_error(points1, points2, H)로 호출
             errors = compute_reprojection_error(points1, points2, H)
             
             # 4. 인라이어 마스크 생성
