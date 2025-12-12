@@ -249,23 +249,31 @@ def simple_blend(image1: np.ndarray, image2: np.ndarray, mask1: Optional[np.ndar
     # 오버랩 영역 식별
     overlap = mask1_float * mask2_float
     
-    # 거리 기반 가중치 계산
-    # 각 마스크의 경계까지의 거리 계산
-    dist1 = compute_distance_to_boundary(mask1)
-    dist2 = compute_distance_to_boundary(mask2)
+    # 거리 기반 가중치 계산 (최적화: 큰 이미지에서는 생략)
+    H, W = image1.shape[:2]
+    use_distance_weighting = (H * W < 1000000)  # 작은 이미지에서만 거리 계산
     
-    # 거리를 가중치로 변환 (거리가 멀수록 가중치가 높음)
-    # 정규화: 거리를 0-1 범위로 변환
-    max_dist1 = np.max(dist1) if np.max(dist1) > 0 else 1.0
-    max_dist2 = np.max(dist2) if np.max(dist2) > 0 else 1.0
-    
-    # 거리 기반 가중치 (거리가 멀수록 해당 이미지의 가중치가 높음)
-    weight1 = dist1 / max_dist1 if max_dist1 > 0 else mask1_float
-    weight2 = dist2 / max_dist2 if max_dist2 > 0 else mask2_float
-    
-    # 오버랩 영역에서만 거리 기반 가중치 사용, 비오버랩 영역에서는 마스크 사용
-    w1 = np.where(overlap > 0, weight1, mask1_float)
-    w2 = np.where(overlap > 0, weight2, mask2_float)
+    if use_distance_weighting and np.any(overlap):
+        # 각 마스크의 경계까지의 거리 계산 (작은 이미지에서만)
+        dist1 = compute_distance_to_boundary(mask1)
+        dist2 = compute_distance_to_boundary(mask2)
+        
+        # 거리를 가중치로 변환 (거리가 멀수록 가중치가 높음)
+        # 정규화: 거리를 0-1 범위로 변환
+        max_dist1 = np.max(dist1) if np.max(dist1) > 0 else 1.0
+        max_dist2 = np.max(dist2) if np.max(dist2) > 0 else 1.0
+        
+        # 거리 기반 가중치 (거리가 멀수록 해당 이미지의 가중치가 높음)
+        weight1 = dist1 / max_dist1 if max_dist1 > 0 else mask1_float
+        weight2 = dist2 / max_dist2 if max_dist2 > 0 else mask2_float
+        
+        # 오버랩 영역에서만 거리 기반 가중치 사용, 비오버랩 영역에서는 마스크 사용
+        w1 = np.where(overlap > 0, weight1, mask1_float)
+        w2 = np.where(overlap > 0, weight2, mask2_float)
+    else:
+        # 큰 이미지 또는 오버랩이 없는 경우: 단순 가중치 사용
+        w1 = mask1_float
+        w2 = mask2_float
     
     # 가중치 정규화
     total_weight = w1 + w2
@@ -322,7 +330,7 @@ def linear_blend(image1: np.ndarray, image2: np.ndarray, overlap_region: Tuple[i
 def create_mask(image: np.ndarray) -> np.ndarray:
     """
     이미지의 유효 영역 마스크를 생성합니다 (0이 아닌 픽셀).
-    개선된 버전: 경계를 더 정확하게 감지합니다.
+    개선된 버전: 경계를 더 정확하게 감지하고, 큰 이미지에서도 메모리 효율적으로 처리합니다.
     
     Args:
         image: 이미지 (H, W, C) - uint8
@@ -330,6 +338,28 @@ def create_mask(image: np.ndarray) -> np.ndarray:
     Returns:
         mask: 마스크 (H, W) - bool, True인 경우 유효 픽셀
     """
+    H, W = image.shape[:2]
+    
+    # 큰 이미지의 경우 타일 단위로 처리 (메모리 효율성)
+    if H * W > 500000:  # 픽셀 수가 50만 개 이상이면 타일 처리
+        mask = np.zeros((H, W), dtype=bool)
+        tile_size = 2000
+        
+        for y_start in range(0, H, tile_size):
+            y_end = min(y_start + tile_size, H)
+            for x_start in range(0, W, tile_size):
+                x_end = min(x_start + tile_size, W)
+                
+                tile = image[y_start:y_end, x_start:x_end]
+                if len(image.shape) == 3:
+                    tile_mask = np.any(tile > 1, axis=2)
+                else:
+                    tile_mask = tile > 1
+                mask[y_start:y_end, x_start:x_end] = tile_mask
+        
+        return mask
+    
+    # 작은 이미지: 직접 처리
     if len(image.shape) == 3:
         # 컬러 이미지: 모든 채널이 0이 아닌 경우만 유효
         # 개선: 약간의 노이즈 허용 (1 이상의 값)
@@ -345,7 +375,7 @@ def compute_distance_to_boundary(mask: np.ndarray) -> np.ndarray:
     """
     마스크의 각 픽셀에서 가장 가까운 경계까지의 거리를 계산합니다.
     
-    효율적인 벡터화 구현: 각 픽셀에서 가장 가까운 경계까지의 거리를 근사치로 계산합니다.
+    최적화된 버전: 큰 이미지에서도 빠르게 동작하도록 간소화된 거리 근사치를 사용합니다.
     
     Args:
         mask: 마스크 (H, W) - bool
@@ -357,6 +387,17 @@ def compute_distance_to_boundary(mask: np.ndarray) -> np.ndarray:
     
     if not np.any(mask):
         return np.zeros((H, W), dtype=np.float32)
+    
+    # 큰 이미지의 경우 거리 계산을 건너뛰고 균등 가중치 반환
+    # 성능 최적화: 픽셀 수가 1백만 개 이상이면 거리 계산 생략
+    if H * W > 1000000:
+        # 큰 이미지: 균등 가중치 반환 (거리 계산 생략)
+        distance = mask.astype(np.float32)
+        return distance
+    
+    # 작은 이미지: 간단한 거리 근사치 계산
+    # 각 픽셀에서 가장 가까운 경계까지의 거리를 근사치로 계산
+    distance = np.zeros((H, W), dtype=np.float32)
     
     # 경계 픽셀 찾기 (마스크가 True이지만 상하좌우 중 하나라도 False인 픽셀)
     mask_padded = np.pad(mask, ((1, 1), (1, 1)), mode='constant', constant_values=False)
@@ -370,10 +411,6 @@ def compute_distance_to_boundary(mask: np.ndarray) -> np.ndarray:
     # 경계 픽셀: 자신은 True이지만 이웃 중 하나라도 False
     boundary = mask & (~up | ~down | ~left | ~right)
     
-    # 간단한 거리 근사: 각 픽셀에서 가장 가까운 경계까지의 거리
-    # 효율성을 위해 각 픽셀의 중심에서 경계까지의 최소 거리를 근사치로 계산
-    distance = np.zeros((H, W), dtype=np.float32)
-    
     # 경계 픽셀의 좌표
     boundary_y, boundary_x = np.where(boundary)
     
@@ -385,24 +422,46 @@ def compute_distance_to_boundary(mask: np.ndarray) -> np.ndarray:
     # 각 마스크 픽셀의 좌표
     mask_y, mask_x = np.where(mask)
     
-    # 벡터화된 거리 계산 (메모리 효율적)
+    # 간단한 거리 근사: 각 마스크 픽셀에서 가장 가까운 경계까지의 거리
+    # 효율성을 위해 다운샘플링된 버전에서 거리 계산
+    if len(mask_y) > 50000:  # 마스크 픽셀이 너무 많으면 다운샘플링
+        # 다운샘플링 비율
+        scale = 4
+        mask_downsampled = mask[::scale, ::scale]
+        distance_downsampled = compute_distance_to_boundary(mask_downsampled)
+        
+        # 업샘플링 (간단한 nearest neighbor - NumPy만 사용, 벡터화)
+        # 원본 크기로 확대
+        H_ds, W_ds = distance_downsampled.shape
+        
+        # 벡터화된 인덱스 계산
+        y_indices = np.arange(H, dtype=np.int32) // scale
+        x_indices = np.arange(W, dtype=np.int32) // scale
+        y_indices = np.clip(y_indices, 0, H_ds - 1)
+        x_indices = np.clip(x_indices, 0, W_ds - 1)
+        
+        # 메시그리드로 인덱스 생성
+        Y, X = np.meshgrid(y_indices, x_indices, indexing='ij')
+        distance = distance_downsampled[Y, X]
+        
+        return distance
+    
+    # 작은 마스크: 직접 거리 계산 (최적화된 버전)
     # 각 마스크 픽셀에 대해 가장 가까운 경계까지의 거리
-    if len(mask_y) > 0 and len(boundary_y) > 0:
-        # 모든 마스크 픽셀과 경계 픽셀 간의 거리 행렬 계산
-        # 메모리 효율을 위해 배치 처리
-        batch_size = 1000
-        for i in range(0, len(mask_y), batch_size):
-            end_idx = min(i + batch_size, len(mask_y))
-            batch_y = mask_y[i:end_idx]
-            batch_x = mask_x[i:end_idx]
-            
-            # 배치 내 각 픽셀에서 모든 경계까지의 거리
-            dy = boundary_y[:, np.newaxis] - batch_y[np.newaxis, :]  # (n_boundary, n_batch)
-            dx = boundary_x[:, np.newaxis] - batch_x[np.newaxis, :]  # (n_boundary, n_batch)
-            dists = np.sqrt(dy**2 + dx**2)  # (n_boundary, n_batch)
-            min_dists = np.min(dists, axis=0)  # (n_batch,)
-            
-            distance[batch_y, batch_x] = min_dists
+    # 벡터화된 계산 (배치 처리)
+    batch_size = 5000  # 배치 크기 증가
+    for i in range(0, len(mask_y), batch_size):
+        end_idx = min(i + batch_size, len(mask_y))
+        batch_y = mask_y[i:end_idx]
+        batch_x = mask_x[i:end_idx]
+        
+        # 배치 내 각 픽셀에서 모든 경계까지의 거리
+        dy = boundary_y[:, np.newaxis] - batch_y[np.newaxis, :]  # (n_boundary, n_batch)
+        dx = boundary_x[:, np.newaxis] - batch_x[np.newaxis, :]  # (n_boundary, n_batch)
+        dists = np.sqrt(dy**2 + dx**2)  # (n_boundary, n_batch)
+        min_dists = np.min(dists, axis=0)  # (n_batch,)
+        
+        distance[batch_y, batch_x] = min_dists
     
     # 정규화 (최대값으로 나누어 0-1 범위로)
     max_dist = np.max(distance)
@@ -519,6 +578,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     
     # 나머지 이미지들을 순차적으로 스티칭
     for i, (image, H) in enumerate(zip(images[1:], homographies)):
+        print(f"  이미지 {i+2}/{len(images)} 스티칭 중...")
+        
         # 누적 변환: H_total = H * H_prev
         cumulative_H = H @ cumulative_H
         
@@ -529,12 +590,15 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         H_offset = T @ cumulative_H
         
         # 이미지 워핑
+        print(f"    워핑 중...")
         warped = inverse_warp(image, H_offset, (canvas_height, canvas_width), offset)
         
         # 블렌딩
+        print(f"    블렌딩 중...")
         mask1 = create_mask(panorama)
         mask2 = create_mask(warped)
         panorama = simple_blend(panorama, warped, mask1, mask2)
+        print(f"  이미지 {i+2} 스티칭 완료")
     
     # 검은색 배경 제거 (크롭)
     mask = create_mask(panorama)
