@@ -174,7 +174,7 @@ def compute_all_homographies(images: List[np.ndarray]) -> List[np.ndarray]:
     Returns:
         homographies: Homography 행렬 리스트 [H1, H2, ...]
                      각 H는 (3, 3) 형태 - float32
-                     H[i]는 images[i+1]을 images[i] 좌표계로 변환
+                     H[i]는 images[i+1]을 images[i] 좌표계로 변환 (forward homography)
     """
     homographies = []
     

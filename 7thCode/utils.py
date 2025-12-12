@@ -1,0 +1,170 @@
+"""
+유틸리티 함수 모듈
+이미지 로드, 그레이스케일 변환, 기본 이미지 처리 함수들을 포함합니다.
+"""
+
+import numpy as np
+import cv2
+import os
+import re
+from typing import List, Tuple, Union
+
+
+def load_image(image_path: str) -> np.ndarray:
+    """
+    이미지 파일을 로드합니다.
+    
+    Args:
+        image_path: 이미지 파일 경로 (str)
+    
+    Returns:
+        image: BGR 형식의 이미지 배열 (H, W, 3) - uint8
+    """
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"이미지를 로드할 수 없습니다: {image_path}")
+    return image
+
+
+def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
+    """
+    폴더에서 모든 이미지를 로드합니다.
+    
+    Args:
+        folder_path: 이미지가 있는 폴더 경로 (str)
+    
+    Returns:
+        images: 이미지 배열 리스트 [image1, image2, ...]
+                각 이미지는 (H, W, 3) 형태 - uint8
+    """
+    import glob
+    
+    # 지원하는 이미지 확장자 (소문자만 사용, Windows는 대소문자 구분 안 함)
+    extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif', 
+                  '*.JPG', '*.JPEG', '*.PNG', '*.BMP', '*.TIFF', '*.TIF']
+    image_paths = []
+    
+    # 모든 확장자로 검색
+    for ext in extensions:
+        paths = glob.glob(os.path.join(folder_path, ext))
+        image_paths.extend(paths)
+    
+    # 중복 제거: 정규화된 경로를 사용하여 중복 확인 (대소문자 구분 없이)
+    unique_paths = []
+    seen_paths = set()
+    for path in image_paths:
+        # 정규화된 경로 (대소문자 구분 없이)
+        path_normalized = os.path.normpath(os.path.normcase(path))
+        if path_normalized not in seen_paths:
+            seen_paths.add(path_normalized)
+            unique_paths.append(path)
+    
+    # Natural Sort: 숫자가 포함된 파일명을 올바르게 정렬
+    # 예: testimg1.jpg, testimg2.jpg, ..., testimg9.jpg, testimg10.jpg
+    # ASCII 정렬: testimg1.jpg, testimg10.jpg, testimg2.jpg (잘못된 순서)
+    # Natural 정렬: testimg1.jpg, testimg2.jpg, ..., testimg9.jpg, testimg10.jpg (올바른 순서)
+    def natural_sort_key(path: str) -> List[Union[int, str]]:
+        """
+        Natural Sort를 위한 키 함수.
+        문자열을 숫자와 텍스트로 분리하여 정렬합니다.
+        """
+        # 파일명만 추출 (경로에서)
+        filename = os.path.basename(path)
+        # 숫자와 비숫자를 분리: 'testimg10.jpg' -> ['testimg', '10', '.jpg']
+        parts = re.split(r'(\d+)', filename)
+        # 숫자는 int로, 텍스트는 소문자로 변환
+        return [int(c) if c.isdigit() else c.lower() for c in parts]
+    
+    unique_paths.sort(key=natural_sort_key)
+    
+    images = []
+    for path in unique_paths:
+        try:
+            img = load_image(path)
+            images.append(img)
+        except Exception as e:
+            print(f"경고: {path} 로드 실패: {e}")
+    
+    return images
+
+
+def rgb_to_grayscale(image: np.ndarray) -> np.ndarray:
+    """
+    RGB/BGR 이미지를 그레이스케일로 변환합니다.
+    
+    Args:
+        image: BGR 형식의 이미지 배열 (H, W, 3) - uint8
+    
+    Returns:
+        gray: 그레이스케일 이미지 배열 (H, W) - float32
+    """
+    if len(image.shape) == 3:
+        # BGR to Grayscale: 0.299*R + 0.587*G + 0.114*B
+        # OpenCV는 BGR 순서이므로 B, G, R 순서
+        gray = 0.114 * image[:, :, 0].astype(np.float32) + \
+               0.587 * image[:, :, 1].astype(np.float32) + \
+               0.299 * image[:, :, 2].astype(np.float32)
+    else:
+        gray = image.astype(np.float32)
+    
+    return gray
+
+
+def normalize_image(image: np.ndarray) -> np.ndarray:
+    """
+    이미지를 0-1 범위로 정규화합니다.
+    
+    Args:
+        image: 이미지 배열 (H, W) 또는 (H, W, C) - uint8 또는 float
+    
+    Returns:
+        normalized: 정규화된 이미지 배열 (H, W) 또는 (H, W, C) - float32
+    """
+    if image.dtype == np.uint8:
+        normalized = image.astype(np.float32) / 255.0
+    else:
+        # 이미 float인 경우 최대값으로 정규화
+        max_val = np.max(image)
+        if max_val > 1.0:
+            normalized = image.astype(np.float32) / max_val
+        else:
+            normalized = image.astype(np.float32)
+    
+    return normalized
+
+
+def denormalize_image(image: np.ndarray) -> np.ndarray:
+    """
+    정규화된 이미지를 0-255 범위로 되돌립니다.
+    
+    Args:
+        image: 정규화된 이미지 배열 (H, W) 또는 (H, W, C) - float32
+    
+    Returns:
+        denormalized: 원래 범위의 이미지 배열 (H, W) 또는 (H, W, C) - uint8
+    """
+    denormalized = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+    return denormalized
+
+
+def show_image(image: np.ndarray, window_name: str = "Image") -> None:
+    """
+    이미지를 화면에 표시합니다.
+    
+    Args:
+        image: 이미지 배열 (H, W) 또는 (H, W, 3) - uint8
+        window_name: 윈도우 이름 (str)
+    """
+    cv2.imshow(window_name, image)
+
+
+def save_image(image: np.ndarray, output_path: str) -> None:
+    """
+    이미지를 파일로 저장합니다.
+    
+    Args:
+        image: 이미지 배열 (H, W) 또는 (H, W, 3) - uint8
+        output_path: 저장할 파일 경로 (str)
+    """
+    cv2.imwrite(output_path, image)
+
