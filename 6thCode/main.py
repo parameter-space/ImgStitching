@@ -52,8 +52,9 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> Tuple
     gray2_low = rgb_to_grayscale(image2_low)  # (new_height2, new_width2) - float32
     
     # 3. 다운스케일된 이미지에서 코너 검출 (저해상도에서 노이즈 감소 및 안정성 향상)
-    corners1_low = harris_corner_detection(gray1_low, threshold=0.01, max_corners=5000)  # (N1, 2) - int32
-    corners2_low = harris_corner_detection(gray2_low, threshold=0.01, max_corners=5000)  # (N2, 2) - int32
+    # 낮은 텍스처 실내 이미지를 위해 threshold를 대폭 낮춤 (0.01 -> 0.0001)
+    corners1_low = harris_corner_detection(gray1_low, threshold=0.0001, max_corners=10000)  # (N1, 2) - int32
+    corners2_low = harris_corner_detection(gray2_low, threshold=0.0001, max_corners=10000)  # (N2, 2) - int32
     
     if len(corners1_low) < 4 or len(corners2_low) < 4:
         print(f"경고: 충분한 코너를 찾지 못했습니다. (corners1: {len(corners1_low)}, corners2: {len(corners2_low)})")
@@ -67,8 +68,9 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> Tuple
     descriptors2_low = compute_descriptors(gray2_low, corners2_low, patch_size=7)  # (N2, D) - float32
     
     # 5. 다운스케일된 이미지에서 특징점 매칭 (NCC 방식 사용 - 조명 차이에 강건함)
-    # NCC는 -1에서 1 사이의 값이므로 threshold를 0.7로 설정 (어려운 영역에서도 더 많은 매칭 허용)
-    matches = match_features(descriptors1_low, descriptors2_low, method='ncc', threshold=0.7)  # List[Tuple[int, int]]
+    # 실내 장면의 반복 패턴을 고려하여 threshold를 0.9로 증가 (엄격한 ratio test)
+    # 유사한 패턴이 많아도 RANSAC이 outlier를 필터링하므로 더 많은 매칭 허용
+    matches = match_features(descriptors1_low, descriptors2_low, method='ncc', threshold=0.9)  # List[Tuple[int, int]]
     
     if len(matches) < 4:
         print(f"경고: 충분한 매칭을 찾지 못했습니다. (matches: {len(matches)})")
@@ -88,12 +90,14 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> Tuple
     
     # 8. 원본 해상도 좌표로 RANSAC Homography 계산
     # ransac_homography 내부에서 Normalized DLT를 사용하므로 고해상도 좌표에서도 수치적으로 안정적
+    # 800px 이미지에서 검출한 특징을 ~4000px로 스케일 업하므로 작은 픽셀 오차가 증폭됨
+    # 따라서 threshold를 10.0으로 증가하여 더 큰 허용 오차 설정
     H_1to2, inlier_mask = ransac_homography(
         points1_orig,  # source: image1의 점들 (원본 해상도)
         points2_orig,  # target: image2의 점들 (원본 해상도)
-        max_iterations=2000,  # 충분한 반복
-        threshold=5.0,        # RANSAC threshold를 5.0으로 설정 (원본 해상도 기준)
-        min_inliers=20        # 증가: 더 많은 인라이어 필요
+        max_iterations=5000,  # 대폭 증가: 낮은 텍스처 이미지에서 해를 찾기 위해
+        threshold=10.0,       # 증가: 스케일 업으로 인한 픽셀 오차 증폭 고려
+        min_inliers=10        # 감소: 낮은 텍스처 이미지를 위해 최소 인라이어 요구사항 완화
     )  # (3, 3) - float32, (M,) - bool
     # H_1to2는 points1_orig을 points2_orig로 변환하는 Homography (즉, image1을 image2로 변환)
     
