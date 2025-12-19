@@ -428,6 +428,13 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         if abs(H_to_first[2, 2]) > 1e-10:
             H_to_first = H_to_first / H_to_first[2, 2]
         
+        # Identity Homography 체크 (같은 위치에 stacking 방지)
+        if np.allclose(H_to_first, np.eye(3, dtype=np.float32), atol=1e-6):
+            print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
+            print(f"    이전 이미지와 같은 위치에 배치되어 stacking이 발생할 수 있습니다.")
+            print(f"    이 이미지를 건너뜁니다.")
+            continue
+        
         # 비정상적인 Homography 검증 (Image 10 같은 경우 방지)
         scale_x = np.sqrt(H_to_first[0, 0]**2 + H_to_first[0, 1]**2)
         scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
@@ -452,6 +459,38 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         if np.any(np.abs(transformed_corners) > 1e6):
             print(f"  Warning: Image {i+1}의 변환된 모서리가 극도로 비정상적입니다. 이 이미지를 건너뜁니다.")
+            continue
+        
+        # 변환된 corner의 범위가 원본 이미지 크기의 배수를 넘는지 확인
+        # 원본 이미지 크기의 5배를 넘으면 비정상적
+        max_reasonable_distance = max(W_img, H_img) * 5
+        corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
+        if np.any(corner_distances > max_reasonable_distance):
+            max_dist = np.max(corner_distances)
+            print(f"  Warning: Image {i+1}의 변환된 모서리가 너무 멀리 떨어져 있음 (최대 거리: {max_dist:.1f} > {max_reasonable_distance:.1f}).")
+            print(f"    이 이미지를 건너뜁니다.")
+            continue
+        
+        # 변환된 corner의 bounding box가 이미지 크기의 몇 배를 넘는지 확인
+        min_x = np.min(transformed_corners[:, 0])
+        max_x = np.max(transformed_corners[:, 0])
+        min_y = np.min(transformed_corners[:, 1])
+        max_y = np.max(transformed_corners[:, 1])
+        
+        bbox_width = max_x - min_x
+        bbox_height = max_y - min_y
+        
+        # Bounding box가 원본 이미지 크기의 3배를 넘으면 비정상적
+        if bbox_width > W_img * 3 or bbox_height > H_img * 3:
+            print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+            print(f"    이 이미지를 건너뜁니다.")
+            continue
+        
+        # 좌상단과 우하단이 뒤바뀐 경우 체크 (이미지가 뒤집힘)
+        # 정상적인 경우: min_x < max_x, min_y < max_y
+        if min_x > max_x or min_y > max_y:
+            print(f"  Warning: Image {i+1}의 변환된 모서리가 뒤바뀐 것 같습니다 (이미지가 뒤집힘).")
+            print(f"    이 이미지를 건너뜁니다.")
             continue
         
         print(f"  Image {i+1} 변환 위치 (첫 번째 이미지 좌표계):")

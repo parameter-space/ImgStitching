@@ -205,16 +205,57 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         scale_y = np.sqrt(H[1, 0]**2 + H[1, 1]**2)
         
         # 비정상적인 scale factor 검증
-        # Identity로 대체하는 대신 경고만 출력하고 계속 진행
-        # (Identity로 대체하면 이미지가 첫 번째 이미지 위치에 배치되어 더 큰 문제 발생)
         if scale_x < 0.05 or scale_x > 20.0 or scale_y < 0.05 or scale_y > 20.0:
             print(f"  Warning: Homography scale factor out of range (x: {scale_x:.2f}, y: {scale_y:.2f}).")
-            print(f"    계속 진행하지만 결과가 부정확할 수 있습니다.")
-            # Identity 대신 원래 Homography 사용 (결과는 부정확하지만 정보 손실 방지)
+            print(f"    Identity matrix로 대체합니다.")
+            return np.eye(3, dtype=np.float32)
         
-        # 10. 추가 검증: Inlier 비율 확인
+        # 10. 변환된 corner 위치 검증: image2의 corner를 image1 좌표계로 변환하여 검증
+        H1, W1 = image1.shape[:2]
+        H2, W2 = image2.shape[:2]
+        
+        # image2의 네 모서리
+        img2_corners = np.array([
+            [0, 0],
+            [W2 - 1, 0],
+            [0, H2 - 1],
+            [W2 - 1, H2 - 1]
+        ], dtype=np.float32)
+        
+        # H를 사용하여 image2 corner를 image1 좌표계로 변환
+        from homography import apply_homography
+        transformed_corners = apply_homography(img2_corners, H)
+        
+        # 변환된 corner의 범위가 합리적인지 검증
+        # 원본 이미지 크기의 5배를 넘으면 비정상적
+        max_reasonable_distance = max(W1, H1) * 5
+        
+        corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
+        if np.any(corner_distances > max_reasonable_distance):
+            max_dist = np.max(corner_distances)
+            print(f"  Warning: 변환된 corner가 너무 멀리 떨어져 있음 (최대 거리: {max_dist:.1f} > {max_reasonable_distance:.1f}).")
+            print(f"    Identity matrix로 대체합니다.")
+            return np.eye(3, dtype=np.float32)
+        
+        # 변환된 corner의 bounding box가 이미지 크기의 몇 배를 넘는지 확인
+        min_x = np.min(transformed_corners[:, 0])
+        max_x = np.max(transformed_corners[:, 0])
+        min_y = np.min(transformed_corners[:, 1])
+        max_y = np.max(transformed_corners[:, 1])
+        
+        bbox_width = max_x - min_x
+        bbox_height = max_y - min_y
+        
+        # Bounding box가 원본 이미지 크기의 3배를 넘으면 비정상적
+        if bbox_width > W1 * 3 or bbox_height > H1 * 3:
+            print(f"  Warning: 변환된 corner의 bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+            print(f"    Identity matrix로 대체합니다.")
+            return np.eye(3, dtype=np.float32)
+        
+        # 11. 추가 검증: Inlier 비율 확인
         if inlier_count < len(matches) * 0.3:  # Inlier 비율이 30% 미만
             print(f"  Warning: Low inlier ratio ({100*inlier_count/len(matches):.1f}% < 30%). Result may be unreliable.")
+            # 낮은 inlier 비율은 경고만 출력 (Identity 대체하지 않음)
     
     return H.astype(np.float32)
 
@@ -231,11 +272,24 @@ def compute_all_homographies(images: List[np.ndarray]) -> List[np.ndarray]:
                      H[i]는 images[i+1]을 images[i] 좌표계로 변환
     """
     homographies = []
+    identity_count = 0
     
     for i in range(len(images) - 1):
         print(f"이미지 {i+1}와 {i+2} 간의 Homography 계산 중...")
         H = compute_pairwise_homography(images[i], images[i+1])
+        
+        # Identity Homography 체크
+        if np.allclose(H, np.eye(3, dtype=np.float32), atol=1e-6):
+            identity_count += 1
+            print(f"  Warning: 이미지 {i+1}와 {i+2} 간의 Homography가 Identity입니다.")
+            print(f"    이 이미지 쌍은 같은 위치에 배치되어 stacking이 발생할 수 있습니다.")
+        
         homographies.append(H)
+        print()
+    
+    if identity_count > 0:
+        print(f"총 {identity_count}개의 Identity Homography가 발견되었습니다.")
+        print(f"  이는 해당 이미지 쌍들이 제대로 매칭되지 않았음을 의미합니다.")
         print()
     
     return homographies
