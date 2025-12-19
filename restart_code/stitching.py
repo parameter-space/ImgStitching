@@ -56,52 +56,6 @@ def bilinear_interpolate(image: np.ndarray, x: float, y: float) -> np.ndarray:
     return value
 
 
-def warp_image(image: np.ndarray, H: np.ndarray, output_shape: tuple) -> np.ndarray:
-    """
-    Homography를 사용하여 이미지를 변환합니다.
-    
-    Args:
-        image: 입력 이미지 (H, W, 3) - uint8
-        H: Homography 행렬 (3, 3) - float32
-        output_shape: 출력 이미지 크기 (height, width) - tuple
-    
-    Returns:
-        warped: 변환된 이미지 (output_shape[0], output_shape[1], 3) - uint8
-    """
-    H_out, W_out = output_shape
-    
-    # 역변환 (출력 좌표 -> 입력 좌표)
-    H_inv = np.linalg.inv(H)
-    
-    warped = np.zeros((H_out, W_out, 3), dtype=np.float32)
-    
-    # 출력 이미지의 각 픽셀에 대해
-    for y_out in range(H_out):
-        for x_out in range(W_out):
-            # 입력 이미지 좌표로 변환
-            point_out = np.array([x_out, y_out, 1.0])
-            point_in_homogeneous = H_inv @ point_out
-            
-            # 일반 좌표로 변환
-            w = point_in_homogeneous[2]
-            if abs(w) < 1e-10:
-                continue
-            
-            x_in = point_in_homogeneous[0] / w
-            y_in = point_in_homogeneous[1] / w
-            
-            # 입력 이미지 경계 확인
-            if x_in < 0 or x_in >= image.shape[1] - 1 or \
-               y_in < 0 or y_in >= image.shape[0] - 1:
-                continue
-            
-            # Bilinear interpolation
-            value = bilinear_interpolate(image, x_in, y_in)
-            warped[y_out, x_out] = value
-    
-    return warped.astype(np.uint8)
-
-
 def compute_global_homographies_center_ref(homographies: list) -> list:
     """
     Center-Reference 방식을 사용하여 전역 Homography를 계산합니다.
@@ -135,6 +89,10 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             # H_global = H[img_idx]^-1 @ H[img_idx+1]^-1 @ ... @ H[center_idx-1]^-1
             H_to_center = np.eye(3, dtype=np.float32)
             for i in range(img_idx, center_idx):
+                # Identity Homography 체크
+                if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
+                    # Identity는 누적에서 스킵 (역행렬도 Identity이므로)
+                    continue
                 H_inv = np.linalg.inv(homographies[i])
                 # 정규화
                 if abs(H_inv[2, 2]) > 1e-10:
@@ -147,6 +105,10 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             # H_global = H[center_idx] @ H[center_idx+1] @ ... @ H[img_idx-1]
             H_to_center = np.eye(3, dtype=np.float32)
             for i in range(center_idx, img_idx):
+                # Identity Homography 체크
+                if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
+                    # Identity는 누적에서 스킵
+                    continue
                 H = homographies[i]
                 H_to_center = H_to_center @ H
             global_homographies.append(H_to_center)
@@ -182,6 +144,9 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
         if center_idx > 0:
             H_center_to_first = np.eye(3, dtype=np.float32)
             for j in range(center_idx):
+                # Identity Homography 체크
+                if np.allclose(homographies[j], np.eye(3, dtype=np.float32), atol=1e-6):
+                    continue
                 H_inv = np.linalg.inv(homographies[j])
                 if abs(H_inv[2, 2]) > 1e-10:
                     H_inv = H_inv / H_inv[2, 2]
@@ -228,11 +193,11 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
             
             # 매우 비정상적인 경우 (Image 10 같은 극단적인 경우)
-            if scale_x > 1000.0 or scale_y > 1000.0 or scale_x < 0.001 or scale_y < 0.001:
+            # 범위를 더 엄격하게 조정
+            if scale_x > 50.0 or scale_y > 50.0 or scale_x < 0.01 or scale_y < 0.01:
                 print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
-                print(f"    이전 이미지의 Homography를 추정하여 사용합니다.")
-                # 이전 이미지의 Homography 기반으로 추정 (간단한 평행이동 가정)
-                # 또는 Identity 사용 (더 안전)
+                print(f"    Identity 사용.")
+                # 비정상적인 Homography는 Identity로 대체
                 H_to_first = np.eye(3, dtype=np.float32)
         
         transformed_corners = apply_homography(img_corners, H_to_first)
@@ -248,15 +213,15 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
         
         valid_transformed_corners = transformed_corners[valid_corners_mask]
         
-        # 이상값 필터링
+        # 추가 이상값 필터링: 이미 valid_transformed_corners에 대해 수행
         max_reasonable_distance = max(total_width, total_height) * 3
-        valid_corners = []
-        for corner in transformed_corners:
-            if abs(corner[0]) < max_reasonable_distance and abs(corner[1]) < max_reasonable_distance:
-                valid_corners.append(corner)
+        # 벡터화된 필터링
+        distance_mask = (np.abs(valid_transformed_corners[:, 0]) < max_reasonable_distance) & \
+                       (np.abs(valid_transformed_corners[:, 1]) < max_reasonable_distance)
         
-        if len(valid_corners) > 0:
-            all_corners.append(np.array(valid_corners, dtype=np.float32))
+        if np.any(distance_mask):
+            final_valid_corners = valid_transformed_corners[distance_mask]
+            all_corners.append(final_valid_corners)
     
     # 모든 모서리 결합
     if len(all_corners) == 0:
@@ -359,6 +324,9 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     if center_idx > 0:
         H_center_to_first = np.eye(3, dtype=np.float32)
         for j in range(center_idx):
+            # Identity Homography 체크
+            if np.allclose(homographies[j], np.eye(3, dtype=np.float32), atol=1e-6):
+                continue
             H_inv = np.linalg.inv(homographies[j])
             if abs(H_inv[2, 2]) > 1e-10:
                 H_inv = H_inv / H_inv[2, 2]
@@ -443,7 +411,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
         
         # 매우 비정상적인 경우 (Image 10 같은 극단적인 경우)
-        if scale_x > 1000.0 or scale_y > 1000.0 or scale_x < 0.001 or scale_y < 0.001:
+        # 범위를 더 엄격하게 조정하여 비정상적인 Homography를 더 빠르게 감지
+        if scale_x > 50.0 or scale_y > 50.0 or scale_x < 0.01 or scale_y < 0.01:
             print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
@@ -506,49 +475,148 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         print(f"    처리 영역: y=[{y_start}, {y_end}), x=[{x_start}, {x_end})")
         
-        # 진행 상황 표시를 위한 계산
+        # 처리 영역 크기 검증
+        if y_end <= y_start or x_end <= x_start:
+            print(f"      Warning: Image {i+1}의 처리 영역이 유효하지 않음. 건너뜁니다.")
+            continue
+        
+        # NumPy 벡터화로 전체 영역 일괄 처리
         total_pixels = (y_end - y_start) * (x_end - x_start)
-        total_rows = y_end - y_start
+        print(f"      벡터화 처리 중: {total_pixels} 픽셀...", end='\r')
         
-        # 처리 영역만 루프
-        # 진행률 출력 빈도: 총 행의 10% 또는 최소 10줄마다
-        progress_update_interval = max(10, total_rows // 10) if total_rows > 0 else 10
+        # 1. meshgrid로 모든 픽셀 좌표 생성
+        y_coords, x_coords = np.meshgrid(
+            np.arange(y_start, y_end, dtype=np.float32),
+            np.arange(x_start, x_end, dtype=np.float32),
+            indexing='ij'
+        )
         
-        for y_idx, y_out in enumerate(range(y_start, y_end)):
-            if y_idx % progress_update_interval == 0:
-                progress = (y_idx / total_rows * 100) if total_rows > 0 else 0
-                print(f"      진행 중: {progress:.1f}%", end='\r')
+        # 2. Canvas 좌표 → 첫 번째 이미지 좌표계 변환 (벡터화)
+        x_canvas = x_coords - width_adjustment
+        y_canvas = y_coords - height_adjustment
+        
+        # 3. 동차 좌표 생성 (벡터화)
+        # Flatten하여 (N, 3) 형태로 변환
+        # C-order로 명시적으로 flatten (행 우선, meshgrid의 indexing='ij'와 호환)
+        N = x_canvas.size
+        points_canvas = np.stack([
+            x_canvas.flatten(order='C'),
+            y_canvas.flatten(order='C'),
+            np.ones(N, dtype=np.float32)
+        ], axis=1)  # (N, 3)
+        
+        # 4. Homography 역변환 (벡터화 - 한 번에 모든 점 변환)
+        # H_inv는 (3, 3), points_canvas.T는 (3, N)
+        # 결과는 (3, N) → 전치하여 (N, 3)
+        points_img_homogeneous = (H_inv @ points_canvas.T).T  # (N, 3)
+        
+        # 5. 정규화 (벡터화)
+        w = points_img_homogeneous[:, 2]
+        valid_mask = np.abs(w) > 1e-10
+        w_safe = np.where(valid_mask, w, 1.0)
+        # C-order로 reshape (flatten과 동일한 순서)
+        x_img_all = (points_img_homogeneous[:, 0] / w_safe).reshape(y_coords.shape, order='C')
+        y_img_all = (points_img_homogeneous[:, 1] / w_safe).reshape(y_coords.shape, order='C')
+        
+        # 6. 경계 마스크 생성 (벡터화)
+        # margin을 2.0으로 증가하여 경계 처리 완화
+        margin = 2.0
+        valid_mask = valid_mask.reshape(y_coords.shape, order='C') & \
+                     (x_img_all >= -margin) & (x_img_all < W_img + margin) & \
+                     (y_img_all >= -margin) & (y_img_all < H_img + margin)
+        
+        # 디버깅: valid_mask 통계 출력
+        total_region_pixels = valid_mask.size
+        valid_count = np.sum(valid_mask)
+        valid_ratio = 100.0 * valid_count / total_region_pixels if total_region_pixels > 0 else 0.0
+        print(f"      유효 픽셀: {valid_count}/{total_region_pixels} ({valid_ratio:.1f}%)", end='\r')
+        
+        # 유효 픽셀이 너무 적으면 경고
+        if valid_count < total_region_pixels * 0.01:  # 1% 미만
+            print(f"\n      Warning: 유효 픽셀이 너무 적음 ({valid_count}/{total_region_pixels}, {valid_ratio:.1f}%).")
+            print(f"        Homography가 부정확하거나 이미지가 처리 영역 밖에 있을 수 있습니다.")
+        
+        # 7. 벡터화된 bilinear interpolation
+        # valid_mask가 True인 픽셀만 처리
+        if np.any(valid_mask):
+            # 경계 클램핑 (edge clamping)
+            x_img_clamped = np.clip(x_img_all[valid_mask], 0.0, float(W_img - 1))
+            y_img_clamped = np.clip(y_img_all[valid_mask], 0.0, float(H_img - 1))
             
-            for x_out in range(x_start, x_end):
-                # Canvas 좌표를 첫 번째 이미지 좌표계로 변환
-                # Canvas 좌표계: (0, 0)이 Canvas의 좌상단
-                # 첫 번째 이미지 좌표계: (0, 0)이 첫 번째 이미지의 좌상단
-                # Canvas의 (height_adjustment, width_adjustment) = 첫 번째 이미지 좌표계의 (0, 0)
-                x_canvas = x_out - width_adjustment
-                y_canvas = y_out - height_adjustment
-                
-                # 첫 번째 이미지 좌표계 → images[i] 좌표계로 변환 (역변환)
-                point_canvas = np.array([x_canvas, y_canvas, 1.0])
-                point_img_homogeneous = H_inv @ point_canvas
-                
-                w = point_img_homogeneous[2]
-                if abs(w) < 1e-10:
-                    continue
-                
-                x_img = point_img_homogeneous[0] / w
-                y_img = point_img_homogeneous[1] / w
-                
-                # Bilinear interpolation (경계 처리 포함)
-                value = bilinear_interpolate(images[i], x_img, y_img)
-                
-                # 이미지 경계 내부에 있는 경우에만 추가
-                margin = 1.0
-                if x_img >= -margin and x_img < W_img + margin and \
-                   y_img >= -margin and y_img < H_img + margin:
-                    panorama[y_out, x_out] += value
-                    count[y_out, x_out] += 1.0
+            # 정수 좌표 (경계 체크 강화)
+            x0 = np.floor(x_img_clamped).astype(np.int32)
+            y0 = np.floor(y_img_clamped).astype(np.int32)
+            x0 = np.clip(x0, 0, W_img - 1)  # 추가 경계 체크
+            y0 = np.clip(y0, 0, H_img - 1)  # 추가 경계 체크
+            x1 = np.clip(x0 + 1, 0, W_img - 1)
+            y1 = np.clip(y0 + 1, 0, H_img - 1)
+            
+            # 가중치 계산 (경계에서 1.0을 넘지 않도록)
+            wx = np.clip(x_img_clamped - x0.astype(np.float32), 0.0, 1.0)
+            wy = np.clip(y_img_clamped - y0.astype(np.float32), 0.0, 1.0)
+            
+            # x1 == x0 또는 y1 == y0인 경우 가중치 보정
+            wx = np.where(x1 == x0, 0.0, wx)
+            wy = np.where(y1 == y0, 0.0, wy)
+            
+            # Bilinear interpolation (벡터화)
+            img_float = images[i].astype(np.float32)
+            
+            # Canvas 좌표 추출 (valid_mask가 True인 위치만)
+            # 이 좌표들은 이미지 내부 픽셀에 해당하는 Canvas 위치
+            valid_y_coords = y_coords[valid_mask].astype(int)
+            valid_x_coords = x_coords[valid_mask].astype(int)
+            
+            # 중요: x0, y0, x1, y1, wx, wy는 valid_mask로 이미 필터링된 상태
+            # 따라서 valid_y_coords, valid_x_coords와 동일한 길이와 순서를 가짐
+            
+            # Canvas 좌표 범위 체크 (추가 안전장치)
+            valid_canvas_mask = (valid_y_coords >= 0) & (valid_y_coords < H_canvas) & \
+                               (valid_x_coords >= 0) & (valid_x_coords < W_canvas)
+            
+            if not np.any(valid_canvas_mask):
+                print(f"      Warning: Image {i+1}의 모든 유효 픽셀이 Canvas 범위를 벗어남")
+                continue
+            
+            # Canvas 범위 내 픽셀만 처리
+            # 모든 배열을 동일한 순서로 필터링하여 인덱스 일관성 유지
+            valid_y_coords = valid_y_coords[valid_canvas_mask]
+            valid_x_coords = valid_x_coords[valid_canvas_mask]
+            x0 = x0[valid_canvas_mask]
+            y0 = y0[valid_canvas_mask]
+            x1 = x1[valid_canvas_mask]
+            y1 = y1[valid_canvas_mask]
+            wx = wx[valid_canvas_mask]
+            wy = wy[valid_canvas_mask]
+            
+            if len(images[i].shape) == 3:
+                # RGB 이미지: (H, W, 3) 형태
+                # y0, x0는 (N,) 형태이므로 img_float[y0, x0]는 (N, 3) 형태로 올바름
+                # 인덱스 범위는 이미 clip되었으므로 안전
+                value = (1 - wx[:, np.newaxis]) * (1 - wy[:, np.newaxis]) * img_float[y0, x0] + \
+                        wx[:, np.newaxis] * (1 - wy[:, np.newaxis]) * img_float[y0, x1] + \
+                        (1 - wx[:, np.newaxis]) * wy[:, np.newaxis] * img_float[y1, x0] + \
+                        wx[:, np.newaxis] * wy[:, np.newaxis] * img_float[y1, x1]
+                # value는 (N, 3) 형태
+            else:
+                # 그레이스케일 이미지: (H, W) 형태
+                value = (1 - wx) * (1 - wy) * img_float[y0, x0] + \
+                        wx * (1 - wy) * img_float[y0, x1] + \
+                        (1 - wx) * wy * img_float[y1, x0] + \
+                        wx * wy * img_float[y1, x1]
+                # value는 (N,) 형태
+            
+            # 값 할당 (순서가 일치하므로 안전)
+            panorama[valid_y_coords, valid_x_coords] += value
+            count[valid_y_coords, valid_x_coords] += 1.0
+            
+            # 실제 할당된 픽셀 수 디버깅
+            assigned_pixels = len(valid_y_coords)
+            print(f"      할당된 픽셀: {assigned_pixels}개" + " " * 20)
+        else:
+            print(f"      Warning: 유효 픽셀이 없음. Image {i+1}를 건너뜁니다." + " " * 20)
         
-        print(f"      완료: Image {i+1} 처리 완료" + " " * 30)  # 공백으로 이전 출력 지움
+        print(f"      완료: Image {i+1} 처리 완료 (벡터화)" + " " * 30)  # 공백으로 이전 출력 지움
     
     # 평균 계산 (blending)
     mask = count > 0
