@@ -102,14 +102,31 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                     continue
                 accumulated_indices.append(i)
                 H_inv = np.linalg.inv(homographies[i])
-                # 정규화
+                
+                # 각 역행렬 정규화 (누적 전에 정규화)
                 if abs(H_inv[2, 2]) > 1e-10:
                     H_inv = H_inv / H_inv[2, 2]
+                
+                # 누적
                 H_to_center = H_to_center @ H_inv
+                
+                # 누적 후 정규화 (오차 누적 방지)
+                if abs(H_to_center[2, 2]) > 1e-10:
+                    H_to_center = H_to_center / H_to_center[2, 2]
+            
+            # 최종 정규화
+            if abs(H_to_center[2, 2]) > 1e-10:
+                H_to_center = H_to_center / H_to_center[2, 2]
             
             # 검증: H_to_center가 올바른지 확인
             scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
             scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
+            
+            # 비정상적인 scale 체크
+            if scale_x < 0.01 or scale_x > 100.0 or scale_y < 0.01 or scale_y > 100.0:
+                print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
+                print(f"    indices: {accumulated_indices}")
+            
             print(f"  Image {img_idx+1}: 왼쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
             
             global_homographies.append(H_to_center)
@@ -131,15 +148,32 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                     # Identity는 누적에서 스킵
                     continue
                 accumulated_indices.append(i)
-                H = homographies[i]
-                # 정규화
+                H = homographies[i].copy()  # 원본 보존
+                
+                # 각 Homography 정규화 (누적 전에 정규화)
                 if abs(H[2, 2]) > 1e-10:
                     H = H / H[2, 2]
+                
+                # 누적
                 H_to_center = H_to_center @ H
+                
+                # 누적 후 정규화 (오차 누적 방지)
+                if abs(H_to_center[2, 2]) > 1e-10:
+                    H_to_center = H_to_center / H_to_center[2, 2]
+            
+            # 최종 정규화
+            if abs(H_to_center[2, 2]) > 1e-10:
+                H_to_center = H_to_center / H_to_center[2, 2]
             
             # 검증: H_to_center가 올바른지 확인
             scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
             scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
+            
+            # 비정상적인 scale 체크
+            if scale_x < 0.01 or scale_x > 100.0 or scale_y < 0.01 or scale_y > 100.0:
+                print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
+                print(f"    indices: {accumulated_indices}")
+            
             print(f"  Image {img_idx+1}: 오른쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
             
             global_homographies.append(H_to_center)
@@ -537,11 +571,14 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         # 3. 변환된 corner의 범위가 원본 이미지 크기의 배수를 넘는지 확인
         # 파노라마는 옆으로 확장될 수 있으므로 더 관대한 기준 사용
-        max_reasonable_distance = max(W_img, H_img) * 10  # 5 → 10으로 완화
+        # 중앙 이미지 기준으로 계산 (모든 이미지가 중앙 이미지 주변에 배치되어야 함)
+        H_center, W_center = images[center_idx].shape[:2]
+        max_reasonable_distance = max(W_center, H_center) * 20  # 10 → 20으로 더 완화
         corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
         if np.any(corner_distances > max_reasonable_distance):
             max_dist = np.max(corner_distances)
             print(f"  Warning: Image {i+1}의 변환된 모서리가 너무 멀리 떨어져 있음 (최대 거리: {max_dist:.1f} > {max_reasonable_distance:.1f}).")
+            print(f"    H_to_center scale: ({scale_x:.2f}, {scale_y:.2f})")
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
@@ -594,6 +631,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         identity_error = np.max(np.abs(H_check - np.eye(3, dtype=np.float32)))
         if identity_error > 1e-4:
             print(f"    Warning: Image {i+1}의 H_inv 검증 실패 (identity_error={identity_error:.2e})")
+            print(f"      H_to_center scale: ({scale_x:.2f}, {scale_y:.2f})")
+            # 검증 실패 시에도 계속 진행 (경고만 출력)
         
         # 최적화: 이미지가 실제로 차지하는 영역만 처리
         # transformed_corners는 중앙 이미지 좌표계 기준
