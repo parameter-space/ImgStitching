@@ -148,14 +148,17 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     if H_center_to_first is None:
         if center_idx > 0:
             H_center_to_first = np.eye(3, dtype=np.float32)
-            for j in range(center_idx):
+            # images[center_idx] → images[0] 변환
+            # 경로: images[center_idx] → images[center_idx-1] → ... → images[0]
+            # H[i]는 images[i+1] → images[i]이므로, 그대로 곱하면 됨
+            # H_center_to_first = H[center_idx-1] @ H[center_idx-2] @ ... @ H[0]
+            for j in range(center_idx - 1, -1, -1):  # j = center_idx-1, center_idx-2, ..., 0 (역순)
                 # Identity Homography 체크
                 if np.allclose(homographies[j], np.eye(3, dtype=np.float32), atol=1e-6):
                     continue
-                H_inv = np.linalg.inv(homographies[j])
-                if abs(H_inv[2, 2]) > 1e-10:
-                    H_inv = H_inv / H_inv[2, 2]
-                H_center_to_first = H_center_to_first @ H_inv
+                H = homographies[j]
+                # H[j]는 images[j+1] → images[j]이므로 그대로 사용
+                H_center_to_first = H_center_to_first @ H
         else:
             H_center_to_first = np.eye(3, dtype=np.float32)
     
@@ -355,14 +358,17 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     # 중앙 이미지를 첫 번째 이미지 좌표계로 변환하는 Homography
     if center_idx > 0:
         H_center_to_first = np.eye(3, dtype=np.float32)
-        for j in range(center_idx):
+        # images[center_idx] → images[0] 변환
+        # 경로: images[center_idx] → images[center_idx-1] → ... → images[0]
+        # H[i]는 images[i+1] → images[i]이므로, 그대로 곱하면 됨
+        # H_center_to_first = H[center_idx-1] @ H[center_idx-2] @ ... @ H[0]
+        for j in range(center_idx - 1, -1, -1):  # j = center_idx-1, center_idx-2, ..., 0 (역순)
             # Identity Homography 체크
             if np.allclose(homographies[j], np.eye(3, dtype=np.float32), atol=1e-6):
                 continue
-            H_inv = np.linalg.inv(homographies[j])
-            if abs(H_inv[2, 2]) > 1e-10:
-                H_inv = H_inv / H_inv[2, 2]
-            H_center_to_first = H_center_to_first @ H_inv
+            H = homographies[j]
+            # H[j]는 images[j+1] → images[j]이므로 그대로 사용
+            H_center_to_first = H_center_to_first @ H
     else:
         H_center_to_first = np.eye(3, dtype=np.float32)
     
