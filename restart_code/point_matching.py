@@ -36,8 +36,11 @@ def compute_descriptors(image: np.ndarray, corners: np.ndarray, patch_size: int 
             descriptor = np.zeros(patch_size * patch_size, dtype=np.float32)
         else:
             # Patch 추출 (padded_image에서, padding을 고려하여 인덱스 조정)
-            # padded_image는 half_size만큼 패딩되어 있으므로 y+half_size, x+half_size 위치에서 추출
-            patch = padded_image[y+half_size:y+half_size+patch_size, x+half_size:x+half_size+patch_size]
+            # Corner (x, y)를 중심으로 patch_size x patch_size patch 추출
+            # 원본 이미지에서: [y-half_size : y+half_size+1, x-half_size : x+half_size+1]
+            # padded_image에서: [(y-half_size)+half_size : (y+half_size+1)+half_size, (x-half_size)+half_size : (x+half_size+1)+half_size]
+            # = [y : y+patch_size, x : x+patch_size]
+            patch = padded_image[y:y+patch_size, x:x+patch_size]
             
             # Flatten
             descriptor = patch.flatten().astype(np.float32)
