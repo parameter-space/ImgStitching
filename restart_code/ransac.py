@@ -111,8 +111,8 @@ def ransac_homography(points1: np.ndarray,
         # Fallback: RANSAC이 실패한 경우
         # 모든 점을 사용하는 것은 outlier가 많을 때 위험하므로,
         # 최선의 RANSAC 결과를 반환 (best_inlier_count가 0인 경우만 Identity)
-        if best_inlier_count == 0:
-            print(f"  Warning: RANSAC failed completely (0 inliers). Returning identity matrix.")
+        if best_inlier_count == 0 or best_H is None:
+            print(f"  Warning: RANSAC failed completely (0 inliers or no valid model). Returning identity matrix.")
             return np.eye(3, dtype=np.float32), np.zeros(N, dtype=bool)
         else:
             print(f"  Warning: RANSAC failed to find enough inliers ({best_inlier_count} < {min_inliers}).")
@@ -137,10 +137,17 @@ def ransac_homography(points1: np.ndarray,
             if inlier_count_refined >= best_inlier_count:
                 return H_refined, inlier_mask_refined
             else:
+                # best_H가 None일 수 없음 (이미 min_inliers 체크를 통과)
                 return best_H, best_inlier_mask
         except:
             # 재계산 실패 시 원래 결과 반환
+            # best_H가 None일 수 없음 (이미 min_inliers 체크를 통과)
             return best_H, best_inlier_mask
     
+    # best_inlier_count >= min_inliers인 경우
+    # best_H가 None일 수 없지만 안전장치 추가
+    if best_H is None:
+        print(f"  Warning: RANSAC internal error (best_H is None despite {best_inlier_count} inliers). Returning identity.")
+        return np.eye(3, dtype=np.float32), np.zeros(N, dtype=bool)
     return best_H, best_inlier_mask
 

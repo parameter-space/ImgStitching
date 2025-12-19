@@ -183,6 +183,7 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
         # images[i]를 첫 번째 이미지 좌표계로 변환
         if i == 0:
             # 첫 번째 이미지는 Identity (자기 자신의 좌표계)
+            # 첫 번째 이미지는 항상 포함되어야 하므로 Identity 체크를 스킵
             H_to_first = np.eye(3, dtype=np.float32)
         else:
             # global_homographies[i]: images[i] → 중앙 좌표계
@@ -193,46 +194,54 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             if abs(H_to_first[2, 2]) > 1e-10:
                 H_to_first = H_to_first / H_to_first[2, 2]
             
-            # 비정상적인 Homography 검증 (Image 10 같은 경우 방지)
+            # 비정상적인 Homography 검증 (극단적인 경우만 제외)
             scale_x = np.sqrt(H_to_first[0, 0]**2 + H_to_first[0, 1]**2)
             scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
             
-            # 매우 비정상적인 경우 (Image 10 같은 극단적인 경우)
-            # 범위를 더 엄격하게 조정
-            if scale_x > 50.0 or scale_y > 50.0 or scale_x < 0.01 or scale_y < 0.01:
+            # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
+            # 100배 이상 확대/축소는 비정상적
+            if scale_x > 100.0 or scale_y > 100.0 or scale_x < 0.001 or scale_y < 0.001:  # 50 → 100, 0.01 → 0.001로 완화
                 print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
                 print(f"    이 이미지를 Canvas 계산에서 제외합니다.")
                 # Identity로 대체하지 않고 이 이미지를 건너뜀
                 continue
-        
-        # Identity Homography 체크 (Canvas 크기 계산에서 제외)
-        if np.allclose(H_to_first, np.eye(3, dtype=np.float32), atol=1e-6):
-            print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
-            print(f"    Canvas 계산에서 제외합니다.")
-            continue
+            
+            # Identity Homography 체크 (첫 번째 이미지가 아닌 경우만, Canvas 크기 계산에서 제외)
+            if np.allclose(H_to_first, np.eye(3, dtype=np.float32), atol=1e-6):
+                print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
+                print(f"    Canvas 계산에서 제외합니다.")
+                continue
         
         transformed_corners = apply_homography(img_corners, H_to_first)
         
-        # 비정상적인 corner 값 필터링 (Image 10 같은 경우 방지)
-        valid_corners_mask = ~(np.isnan(transformed_corners).any(axis=1) | np.isinf(transformed_corners).any(axis=1))
-        # 극단적으로 큰 값도 필터링
-        valid_corners_mask = valid_corners_mask & (np.abs(transformed_corners[:, 0]) < 1e6) & (np.abs(transformed_corners[:, 1]) < 1e6)
-        
-        if not np.any(valid_corners_mask):
-            print(f"  Warning: Image {i+1}의 변환된 모서리가 모두 비정상적. 이 이미지를 건너뜁니다.")
-            continue
-        
-        valid_transformed_corners = transformed_corners[valid_corners_mask]
-        
-        # 추가 이상값 필터링: 이미 valid_transformed_corners에 대해 수행
-        max_reasonable_distance = max(total_width, total_height) * 3
-        # 벡터화된 필터링
-        distance_mask = (np.abs(valid_transformed_corners[:, 0]) < max_reasonable_distance) & \
-                       (np.abs(valid_transformed_corners[:, 1]) < max_reasonable_distance)
-        
-        if np.any(distance_mask):
-            final_valid_corners = valid_transformed_corners[distance_mask]
-            all_corners.append(final_valid_corners)
+        # 첫 번째 이미지는 항상 포함 (Identity이므로 원본 corner와 동일)
+        if i == 0:
+            # 첫 번째 이미지는 항상 추가 (검증 불필요)
+            all_corners.append(transformed_corners)
+        else:
+            # 비정상적인 corner 값 필터링 (Image 10 같은 경우 방지)
+            valid_corners_mask = ~(np.isnan(transformed_corners).any(axis=1) | np.isinf(transformed_corners).any(axis=1))
+            # 극단적으로 큰 값도 필터링
+            valid_corners_mask = valid_corners_mask & (np.abs(transformed_corners[:, 0]) < 1e6) & (np.abs(transformed_corners[:, 1]) < 1e6)
+            
+            if not np.any(valid_corners_mask):
+                print(f"  Warning: Image {i+1}의 변환된 모서리가 모두 비정상적. 이 이미지를 건너뜁니다.")
+                continue
+            
+            valid_transformed_corners = transformed_corners[valid_corners_mask]
+            
+            # 추가 이상값 필터링: 더 관대한 기준 사용
+            # 파노라마는 이미지들이 옆으로 확장될 수 있으므로, 더 넓은 범위 허용
+            max_reasonable_distance = max(total_width, total_height) * 5  # 3 → 5로 완화
+            # 벡터화된 필터링
+            distance_mask = (np.abs(valid_transformed_corners[:, 0]) < max_reasonable_distance) & \
+                           (np.abs(valid_transformed_corners[:, 1]) < max_reasonable_distance)
+            
+            if np.any(distance_mask):
+                final_valid_corners = valid_transformed_corners[distance_mask]
+                all_corners.append(final_valid_corners)
+            else:
+                print(f"  Warning: Image {i+1}의 변환된 모서리가 distance_mask에서 제외됨. 이 이미지를 건너뜁니다.")
     
     # 모든 모서리 결합
     if len(all_corners) == 0:
@@ -280,8 +289,14 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     
     # Canvas 크기 계산
     # bounds_max_x, bounds_max_y는 항상 >= 0 (첫 번째 이미지 크기 이상)
-    width = int(np.ceil(bounds_max_x)) + 1 + width_adjustment
-    height = int(np.ceil(bounds_max_y)) + 1 + height_adjustment
+    # Padding 추가: 각 방향에 50픽셀 여유 공간 추가 (Ghost 현상 방지 및 안전한 배치)
+    padding = 50
+    width = int(np.ceil(bounds_max_x)) + 1 + width_adjustment + padding * 2
+    height = int(np.ceil(bounds_max_y)) + 1 + height_adjustment + padding * 2
+    
+    # adjustment에 padding 추가 (첫 번째 이미지 위치 조정)
+    width_adjustment += padding
+    height_adjustment += padding
     
     # Canvas 크기 검증
     if width <= 0 or height <= 0:
@@ -360,6 +375,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     
     print(f"Canvas 크기: {W_canvas}x{H_canvas} 픽셀")
     print(f"Offset: ({x_offset}, {y_offset})")
+    print(f"Adjustments: (height={height_adjustment}, width={width_adjustment})")
+    print(f"Bounds: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
     print(f"중앙 이미지 인덱스: {center_idx + 1} (0-based: {center_idx})")
     print()
     
@@ -410,14 +427,16 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # Weighted blending을 위한 가중치 합 (이미지 중심에서의 거리 기반)
         # 간단하게 첫 번째 이미지는 가중치 1.0
         weight_sum[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
+        print(f"  첫 번째 이미지 배치 완료: Canvas 좌표 y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
     else:
-        print(f"  Warning: 첫 번째 이미지 배치 실패")
+        print(f"  ERROR: 첫 번째 이미지 배치 실패")
         print(f"    Canvas 좌표: y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
         print(f"    Source 좌표: y=[{src_y_start}, {src_y_end}), x=[{src_x_start}, {src_x_end})")
         print(f"    Image shape: {images[0].shape}")
         print(f"    Adjustments: h={height_adjustment}, w={width_adjustment}")
         print(f"    Canvas 크기: {H_canvas}x{W_canvas}")
         print(f"    canvas_y_start={canvas_y_start}, canvas_x_start={canvas_x_start}")
+        return None
     
     # 나머지 이미지들 추가
     for i in range(1, len(images)):
@@ -441,13 +460,13 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
-        # 비정상적인 Homography 검증 (Image 10 같은 경우 방지)
+        # 비정상적인 Homography 검증 (극단적인 경우만 제외)
         scale_x = np.sqrt(H_to_first[0, 0]**2 + H_to_first[0, 1]**2)
         scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
         
-        # 매우 비정상적인 경우 (Image 10 같은 극단적인 경우)
-        # 범위를 더 엄격하게 조정하여 비정상적인 Homography를 더 빠르게 감지
-        if scale_x > 50.0 or scale_y > 50.0 or scale_x < 0.01 or scale_y < 0.01:
+        # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
+        # 100배 이상 확대/축소는 비정상적
+        if scale_x > 100.0 or scale_y > 100.0 or scale_x < 0.001 or scale_y < 0.001:  # 50 → 100, 0.01 → 0.001로 완화
             print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
@@ -470,7 +489,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             continue
         
         # 3. 변환된 corner의 범위가 원본 이미지 크기의 배수를 넘는지 확인
-        max_reasonable_distance = max(W_img, H_img) * 5
+        # 파노라마는 옆으로 확장될 수 있으므로 더 관대한 기준 사용
+        max_reasonable_distance = max(W_img, H_img) * 10  # 5 → 10으로 완화
         corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
         if np.any(corner_distances > max_reasonable_distance):
             max_dist = np.max(corner_distances)
@@ -487,7 +507,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         bbox_width = max_x - min_x
         bbox_height = max_y - min_y
         
-        if bbox_width > W_img * 3 or bbox_height > H_img * 3:
+        # 파노라마는 이미지들이 옆으로 확장될 수 있으므로 더 관대한 기준 사용
+        if bbox_width > W_img * 5 or bbox_height > H_img * 5:  # 3 → 5로 완화
             print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
@@ -683,8 +704,11 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             distances = np.sqrt((x_img_filtered - center_x)**2 + (y_img_filtered - center_y)**2)
             
             # 가중치: 중심에 가까울수록 높은 가중치 (선형 감쇠)
-            # 거리가 멀수록 가중치 감소, 최소 0.1 보장
-            weights = np.maximum(1.0 - (distances / (max_dist + 1e-6)), 0.1)
+            # 거리가 멀수록 가중치 감소, 이미지 경계 근처에서 더 빠르게 감소
+            # Ghost 현상 감소를 위해 경계 가중치를 더 강하게 감소
+            normalized_distances = distances / (max_dist + 1e-6)
+            # 거리 기반 가중치: 중심에서 멀어질수록 더 빠르게 감소 (제곱 함수 사용)
+            weights = np.maximum((1.0 - normalized_distances) ** 2, 0.05)  # 최소값 0.05, 제곱으로 더 빠른 감소
             
             # 값 할당 (가중치 적용)
             # Weighted sum: panorama += value * weight

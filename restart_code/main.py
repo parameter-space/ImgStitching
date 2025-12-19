@@ -179,16 +179,10 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     inlier_count = np.sum(inlier_mask)
     print(f"  RANSAC inliers: {inlier_count}/{len(matches)} ({100*inlier_count/len(matches):.1f}%)")
     
+    # RANSAC fallback은 이미 ransac_homography 내부에서 처리됨
+    # 여기서는 추가 검증만 수행 (경고 출력)
     if inlier_count < 4:
-        print(f"  Warning: Too few inliers after RANSAC ({inlier_count} < 4).")
-        # Identity 대신 RANSAC 결과를 사용 (아주 부정확하더라도 정보 보존)
-        # 단, 매우 비정상적인 경우에만 Identity 사용
-        if inlier_count == 0:
-            print(f"    No inliers found. Using identity matrix as last resort.")
-            return np.eye(3, dtype=np.float32)
-        else:
-            print(f"    Using RANSAC result despite low inlier count (may be inaccurate).")
-            # inlier_count가 0이 아니면 RANSAC 결과 사용
+        print(f"  Warning: Low inlier count ({inlier_count} < 4). Result may be unreliable.")
     
     # 8. 스티칭에는 image2를 image1로 변환하는 Homography가 필요하므로 역행렬 사용
     det = np.linalg.det(H_1to2)
@@ -200,12 +194,12 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         if abs(H[2, 2]) > 1e-10:
             H = H / H[2, 2]  # 정규화
         
-        # 9. Homography 검증: Scale factor 체크
+        # 9. Homography 검증: Scale factor 체크 (완화)
         scale_x = np.sqrt(H[0, 0]**2 + H[0, 1]**2)
         scale_y = np.sqrt(H[1, 0]**2 + H[1, 1]**2)
         
-        # 비정상적인 scale factor 검증
-        if scale_x < 0.05 or scale_x > 20.0 or scale_y < 0.05 or scale_y > 20.0:
+        # 비정상적인 scale factor 검증 (완화: 파노라마는 확대/축소될 수 있음)
+        if scale_x < 0.01 or scale_x > 100.0 or scale_y < 0.01 or scale_y > 100.0:  # 0.05→0.01, 20→100으로 완화
             print(f"  Warning: Homography scale factor out of range (x: {scale_x:.2f}, y: {scale_y:.2f}).")
             print(f"    Identity matrix로 대체합니다.")
             return np.eye(3, dtype=np.float32)
@@ -225,9 +219,9 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         # H를 사용하여 image2 corner를 image1 좌표계로 변환
         transformed_corners = apply_homography(img2_corners, H)
         
-        # 변환된 corner의 범위가 합리적인지 검증
-        # 원본 이미지 크기의 5배를 넘으면 비정상적
-        max_reasonable_distance = max(W1, H1) * 5
+        # 변환된 corner의 범위가 합리적인지 검증 (완화)
+        # 파노라마는 옆으로 확장될 수 있으므로 더 관대한 기준 사용
+        max_reasonable_distance = max(W1, H1) * 10  # 5 → 10으로 완화
         
         corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
         if np.any(corner_distances > max_reasonable_distance):
@@ -236,7 +230,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
             print(f"    Identity matrix로 대체합니다.")
             return np.eye(3, dtype=np.float32)
         
-        # 변환된 corner의 bounding box가 이미지 크기의 몇 배를 넘는지 확인
+        # 변환된 corner의 bounding box가 이미지 크기의 몇 배를 넘는지 확인 (완화)
         min_x = np.min(transformed_corners[:, 0])
         max_x = np.max(transformed_corners[:, 0])
         min_y = np.min(transformed_corners[:, 1])
@@ -245,8 +239,8 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         bbox_width = max_x - min_x
         bbox_height = max_y - min_y
         
-        # Bounding box가 원본 이미지 크기의 3배를 넘으면 비정상적
-        if bbox_width > W1 * 3 or bbox_height > H1 * 3:
+        # Bounding box가 원본 이미지 크기의 5배를 넘으면 비정상적 (완화)
+        if bbox_width > W1 * 5 or bbox_height > H1 * 5:  # 3 → 5로 완화
             print(f"  Warning: 변환된 corner의 bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
             print(f"    Identity matrix로 대체합니다.")
             return np.eye(3, dtype=np.float32)
