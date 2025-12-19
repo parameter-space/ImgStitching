@@ -164,16 +164,17 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     
     # 첫 번째 이미지를 기준으로 설정
     H0, W0 = images[0].shape[:2]
-    total_width = W0
-    total_height = H0
+    
+    # max_reasonable_distance 계산용: 첫 번째 이미지 크기를 기준으로 사용
+    # 모든 이미지 크기를 누적하면 실제 파노라마 크기보다 훨씬 크므로, 첫 번째 이미지 크기만 사용
+    base_width = W0
+    base_height = H0
     
     # 모든 이미지의 변환된 모서리 계산
     all_corners = []
     
     for i, img in enumerate(images):
         H_img, W_img = img.shape[:2]
-        total_width += W_img
-        total_height += H_img
         
         # 이미지의 네 모서리
         img_corners = np.array([
@@ -235,7 +236,8 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             
             # 추가 이상값 필터링: 더 관대한 기준 사용
             # 파노라마는 이미지들이 옆으로 확장될 수 있으므로, 더 넓은 범위 허용
-            max_reasonable_distance = max(total_width, total_height) * 5  # 3 → 5로 완화
+            # 첫 번째 이미지 크기를 기준으로 사용 (모든 이미지 크기 누적은 실제 크기보다 훨씬 큼)
+            max_reasonable_distance = max(base_width, base_height) * 5  # 3 → 5로 완화
             # 벡터화된 필터링
             distance_mask = (np.abs(valid_transformed_corners[:, 0]) < max_reasonable_distance) & \
                            (np.abs(valid_transformed_corners[:, 1]) < max_reasonable_distance)
@@ -280,26 +282,42 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     x_offset = 0  # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 x=0
     y_offset = 0  # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 y=0
     
-    if bounds_min_x < 0:
-        width_adjustment = -int(np.floor(bounds_min_x))  # 음수 부분만큼 Canvas 확장
-    else:
-        width_adjustment = 0
-    
-    if bounds_min_y < 0:
-        height_adjustment = -int(np.floor(bounds_min_y))  # 음수 부분만큼 Canvas 확장
-    else:
-        height_adjustment = 0
-    
-    # Canvas 크기 계산
-    # bounds_max_x, bounds_max_y는 항상 >= 0 (첫 번째 이미지 크기 이상)
     # Padding 추가: 각 방향에 50픽셀 여유 공간 추가 (Ghost 현상 방지 및 안전한 배치)
     padding = 50
-    width = int(np.ceil(bounds_max_x)) + 1 + width_adjustment + padding * 2
-    height = int(np.ceil(bounds_max_y)) + 1 + height_adjustment + padding * 2
     
-    # adjustment에 padding 추가 (첫 번째 이미지 위치 조정)
-    width_adjustment += padding
-    height_adjustment += padding
+    # width_adjustment와 height_adjustment 계산
+    # 첫 번째 이미지 좌표계에서 (0, 0) = Canvas 좌표계에서 (height_adjustment, width_adjustment)
+    # bounds_min_x, bounds_min_y가 음수면 그만큼 Canvas를 왼쪽/위로 확장해야 함
+    if bounds_min_x < 0:
+        width_adjustment = -int(np.floor(bounds_min_x)) + padding  # 음수 부분 + padding
+    else:
+        width_adjustment = padding  # bounds_min_x >= 0이면 padding만 필요
+    
+    if bounds_min_y < 0:
+        height_adjustment = -int(np.floor(bounds_min_y)) + padding  # 음수 부분 + padding
+    else:
+        height_adjustment = padding  # bounds_min_y >= 0이면 padding만 필요
+    
+    # Canvas 크기 계산
+    # 실제 필요한 크기: (bounds_max_x - bounds_min_x) + 1 + padding * 2
+    # bounds_max_x는 첫 번째 이미지 좌표계 기준이므로, bounds_min_x를 고려해야 함
+    if bounds_min_x < 0:
+        # bounds_min_x가 음수면, 실제 범위는 bounds_max_x - bounds_min_x
+        actual_width = int(np.ceil(bounds_max_x - bounds_min_x)) + 1
+    else:
+        # bounds_min_x >= 0이면, 실제 범위는 bounds_max_x (첫 번째 이미지가 (0, 0)에서 시작)
+        actual_width = int(np.ceil(bounds_max_x)) + 1
+    
+    if bounds_min_y < 0:
+        # bounds_min_y가 음수면, 실제 범위는 bounds_max_y - bounds_min_y
+        actual_height = int(np.ceil(bounds_max_y - bounds_min_y)) + 1
+    else:
+        # bounds_min_y >= 0이면, 실제 범위는 bounds_max_y
+        actual_height = int(np.ceil(bounds_max_y)) + 1
+    
+    # Canvas 크기 = 실제 필요한 크기 + padding * 2 (양쪽 끝)
+    width = actual_width + padding * 2
+    height = actual_height + padding * 2
     
     # Canvas 크기 검증
     if width <= 0 or height <= 0:
@@ -380,9 +398,10 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     bounds_min_x, bounds_max_x, bounds_min_y, bounds_max_y = bounds
     
     print(f"Canvas 크기: {W_canvas}x{H_canvas} 픽셀")
+    print(f"  실제 이미지 범위: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
+    print(f"  첫 번째 이미지 Canvas 위치: ({width_adjustment}, {height_adjustment})")
+    print(f"  Padding: 50픽셀 (각 방향)")
     print(f"Offset: ({x_offset}, {y_offset})")
-    print(f"Adjustments: (height={height_adjustment}, width={width_adjustment})")
-    print(f"Bounds: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
     print(f"중앙 이미지 인덱스: {center_idx + 1} (0-based: {center_idx})")
     print()
     

@@ -26,13 +26,18 @@ def compute_image_gradients(image: np.ndarray) -> tuple:
     # Padding 추가
     padded = np.pad(image, ((1, 1), (1, 1)), mode='edge')
     
-    # x 방향 gradient
+    # x 방향 gradient (Sobel operator)
+    # 원본 image의 (i, j) 위치는 padded의 (i+1, j+1) 위치
+    # Sobel x: [-1, 0, 1; -2, 0, 2; -1, 0, 1]
+    # 각 픽셀 (i, j)에서: 왼쪽(j-1), 중앙(j), 오른쪽(j+1) 필요
     Ix = -1 * padded[0:H, 0:W] + 1 * padded[0:H, 2:W+2] + \
          -2 * padded[1:H+1, 0:W] + 2 * padded[1:H+1, 2:W+2] + \
          -1 * padded[2:H+2, 0:W] + 1 * padded[2:H+2, 2:W+2]
     Ix = Ix / 4.0
     
-    # y 방향 gradient
+    # y 방향 gradient (Sobel operator)
+    # Sobel y: [-1, -2, -1; 0, 0, 0; 1, 2, 1]
+    # 각 픽셀 (i, j)에서: 위(i-1), 중앙(i), 아래(i+1) 필요
     Iy = -1 * padded[0:H, 0:W] - 2 * padded[0:H, 1:W+1] - 1 * padded[0:H, 2:W+2] + \
           1 * padded[2:H+2, 0:W] + 2 * padded[2:H+2, 1:W+1] + 1 * padded[2:H+2, 2:W+2]
     Iy = Iy / 4.0
