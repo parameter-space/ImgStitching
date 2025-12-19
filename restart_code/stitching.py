@@ -103,16 +103,25 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                 H_to_center = H_to_center @ H_inv
             global_homographies.append(H_to_center)
         else:
-            # 중앙보다 오른쪽: 정방향 누적
-            # images[center_idx] → images[center_idx+1] → ... → images[img_idx]
-            # H_global = H[center_idx] @ H[center_idx+1] @ ... @ H[img_idx-1]
+            # 중앙보다 오른쪽: 순방향 누적
+            # images[img_idx] → images[img_idx-1] → ... → images[center_idx]
+            # H[i]는 images[i+1] → images[i]이므로,
+            # images[img_idx] → images[img_idx-1]은 H[img_idx-1]
+            # images[img_idx-1] → images[img_idx-2]는 H[img_idx-2]
+            # ...
+            # images[center_idx+1] → images[center_idx]는 H[center_idx]
+            # H_global = H[img_idx-1] @ H[img_idx-2] @ ... @ H[center_idx]
+            # 역순으로 누적해야 하므로 range를 역순으로
             H_to_center = np.eye(3, dtype=np.float32)
-            for i in range(center_idx, img_idx):
+            for i in range(img_idx - 1, center_idx - 1, -1):  # img_idx-1부터 center_idx까지 역순
                 # Identity Homography 체크
                 if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
                     # Identity는 누적에서 스킵
                     continue
                 H = homographies[i]
+                # 정규화
+                if abs(H[2, 2]) > 1e-10:
+                    H = H / H[2, 2]
                 H_to_center = H_to_center @ H
             global_homographies.append(H_to_center)
     
@@ -220,16 +229,18 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
                 print(f"  Warning: Image {i+1}의 변환된 모서리가 뒤바뀐 것 같습니다 (이미지가 뒤집힘). Canvas 계산에서 제외합니다.")
                 continue
             
-            # Bounding box 크기 체크
+            # Bounding box 크기 체크 (Canvas 크기 계산 시)
             bbox_width = max_x - min_x
             bbox_height = max_y - min_y
-            if bbox_width > W_img * 5 or bbox_height > H_img * 5:
-                print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}). Canvas 계산에서 제외합니다.")
+            # Corner distance 검증이 이미 있으므로, bounding box 검증은 매우 관대하게 설정
+            # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 50배 이상)
+            if bbox_width > W_img * 50 or bbox_height > H_img * 50:
+                print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 극도로 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}). Canvas 계산에서 제외합니다.")
                 continue
             
             # 추가 이상값 필터링: 더 관대한 기준 사용
             # 파노라마는 이미지들이 옆으로 확장될 수 있으므로, 더 넓은 범위 허용
-            # 첫 번째 이미지 크기를 기준으로 사용 (모든 이미지 크기 누적은 실제 크기보다 훨씬 큼)
+            # 중앙 이미지 크기를 기준으로 사용 (모든 이미지 크기 누적은 실제 크기보다 훨씬 큼)
             max_reasonable_distance = max(base_width, base_height) * 5  # 3 → 5로 완화
             # 벡터화된 필터링
             distance_mask = (np.abs(valid_transformed_corners[:, 0]) < max_reasonable_distance) & \
@@ -311,8 +322,11 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     ideal_center_y = (height - H_center) / 2
     
     # bounds를 고려한 최소값
-    min_width_adjustment = padding - bounds_min_x if bounds_min_x < 0 else padding
-    min_height_adjustment = padding - bounds_min_y if bounds_min_y < 0 else padding
+    # 중앙 이미지 좌표계의 (bounds_min_x)가 Canvas 좌표계의 (padding)에 오려면:
+    # padding = bounds_min_x + width_adjustment
+    # 따라서 width_adjustment = padding - bounds_min_x (bounds_min_x의 부호와 무관)
+    min_width_adjustment = padding - bounds_min_x
+    min_height_adjustment = padding - bounds_min_y
     
     # 두 조건 중 더 큰 값 선택 (모든 이미지를 포함하면서 중앙 이미지를 가능한 한 중앙에)
     width_adjustment = max(int(ideal_center_x), int(min_width_adjustment))
@@ -521,9 +535,13 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         bbox_width = max_x - min_x
         bbox_height = max_y - min_y
         
-        # 파노라마는 이미지들이 옆으로 확장될 수 있으므로 더 관대한 기준 사용
-        if bbox_width > W_img * 5 or bbox_height > H_img * 5:  # 3 → 5로 완화
-            print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+        # 파노라마는 이미지들이 옆으로 확장될 수 있으므로 매우 관대한 기준 사용
+        # Corner distance 검증이 이미 있으므로, bounding box 검증은 매우 관대하게 설정
+        # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 50배 이상)
+        # 일반적으로는 corner distance 검증으로 충분함
+        if bbox_width > W_img * 50 or bbox_height > H_img * 50:
+            print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 극도로 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+            print(f"    이는 Homography 계산 오류를 의미할 수 있습니다.")
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
@@ -583,11 +601,12 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # Flatten하여 (N, 3) 형태로 변환
         # C-order로 명시적으로 flatten (행 우선, meshgrid의 indexing='ij'와 호환)
         N = x_canvas.size
-        points_canvas = np.stack([
+        # column_stack은 1D 배열들을 열 방향으로 스택하여 (N, 3) 형태 생성
+        points_canvas = np.column_stack([
             x_canvas.flatten(order='C'),
             y_canvas.flatten(order='C'),
             np.ones(N, dtype=np.float32)
-        ], axis=1)  # (N, 3)
+        ])  # (N, 3)
         
         # 4. Homography 역변환 (벡터화 - 한 번에 모든 점 변환)
         # H_inv는 (3, 3), points_canvas.T는 (3, N)

@@ -138,8 +138,10 @@ def apply_homography(points: np.ndarray, H: np.ndarray) -> np.ndarray:
     
     # 일반 좌표로 변환
     w = transformed_homogeneous[:, 2]
-    w = np.where(np.abs(w) < 1e-10, 1.0, w)  # 0으로 나누기 방지
-    transformed = transformed_homogeneous[:, :2] / w[:, np.newaxis]
+    # w ≈ 0인 경우는 invalid하므로 NaN으로 표시 (stitching.py와 일관성 유지)
+    # 실제 warping에서는 valid_mask로 필터링하지만, 여기서는 NaN 반환하여 명확히 표시
+    w_safe = np.where(np.abs(w) > 1e-10, w, np.nan)
+    transformed = transformed_homogeneous[:, :2] / w_safe[:, np.newaxis]
     
     return transformed
 

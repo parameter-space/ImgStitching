@@ -239,9 +239,12 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         bbox_width = max_x - min_x
         bbox_height = max_y - min_y
         
-        # Bounding box가 원본 이미지 크기의 5배를 넘으면 비정상적 (완화)
-        if bbox_width > W1 * 5 or bbox_height > H1 * 5:  # 3 → 5로 완화
-            print(f"  Warning: 변환된 corner의 bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+        # Bounding box 검증: Corner distance 검증이 이미 있으므로 매우 관대하게 설정
+        # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 50배 이상)
+        # 파노라마에서는 이미지들이 옆으로 확장되면서 bounding box가 클 수 있음
+        if bbox_width > W1 * 50 or bbox_height > H1 * 50:
+            print(f"  Warning: 변환된 corner의 bounding box가 극도로 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+            print(f"    이는 Homography 계산 오류를 의미할 수 있습니다.")
             print(f"    Identity matrix로 대체합니다.")
             return np.eye(3, dtype=np.float32)
         
