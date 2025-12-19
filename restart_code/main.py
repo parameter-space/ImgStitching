@@ -14,7 +14,7 @@ from typing import List, Tuple
 from utils import load_images_from_folder, rgb_to_grayscale, normalize_image, save_image, show_image
 from corner_detection import harris_corner_detection
 from point_matching import compute_descriptors, match_features, get_matched_points
-from homography import compute_homography_dlt
+from homography import compute_homography_dlt, apply_homography
 from ransac import ransac_homography
 from stitching import stitch_multiple_images
 
@@ -223,7 +223,6 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         ], dtype=np.float32)
         
         # H를 사용하여 image2 corner를 image1 좌표계로 변환
-        from homography import apply_homography
         transformed_corners = apply_homography(img2_corners, H)
         
         # 변환된 corner의 범위가 합리적인지 검증

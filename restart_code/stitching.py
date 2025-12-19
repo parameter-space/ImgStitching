@@ -201,9 +201,15 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             # 범위를 더 엄격하게 조정
             if scale_x > 50.0 or scale_y > 50.0 or scale_x < 0.01 or scale_y < 0.01:
                 print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
-                print(f"    Identity 사용.")
-                # 비정상적인 Homography는 Identity로 대체
-                H_to_first = np.eye(3, dtype=np.float32)
+                print(f"    이 이미지를 Canvas 계산에서 제외합니다.")
+                # Identity로 대체하지 않고 이 이미지를 건너뜀
+                continue
+        
+        # Identity Homography 체크 (Canvas 크기 계산에서 제외)
+        if np.allclose(H_to_first, np.eye(3, dtype=np.float32), atol=1e-6):
+            print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
+            print(f"    Canvas 계산에서 제외합니다.")
+            continue
         
         transformed_corners = apply_homography(img_corners, H_to_first)
         
@@ -448,21 +454,22 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         H_img, W_img = images[i].shape[:2]
         
-        # 디버깅: 이미지 변환 위치 출력
+        # 디버깅: 이미지 변환 위치 계산 및 검증
         img_corners = np.array([[0, 0], [W_img-1, 0], [0, H_img-1], [W_img-1, H_img-1]], dtype=np.float32)
         transformed_corners = apply_homography(img_corners, H_to_first)
         
-        # 비정상적인 corner 값 사전 검증
+        # 비정상적인 corner 값 검증 (통합 검증)
+        # 1. NaN/Inf 체크
         if np.any(np.isnan(transformed_corners)) or np.any(np.isinf(transformed_corners)):
             print(f"  Warning: Image {i+1}의 변환된 모서리에 NaN/Inf가 있습니다. 이 이미지를 건너뜁니다.")
             continue
         
+        # 2. 극단적으로 큰 값 체크
         if np.any(np.abs(transformed_corners) > 1e6):
             print(f"  Warning: Image {i+1}의 변환된 모서리가 극도로 비정상적입니다. 이 이미지를 건너뜁니다.")
             continue
         
-        # 변환된 corner의 범위가 원본 이미지 크기의 배수를 넘는지 확인
-        # 원본 이미지 크기의 5배를 넘으면 비정상적
+        # 3. 변환된 corner의 범위가 원본 이미지 크기의 배수를 넘는지 확인
         max_reasonable_distance = max(W_img, H_img) * 5
         corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
         if np.any(corner_distances > max_reasonable_distance):
@@ -471,7 +478,7 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
-        # 변환된 corner의 bounding box가 이미지 크기의 몇 배를 넘는지 확인
+        # 4. Bounding box 크기 체크
         min_x = np.min(transformed_corners[:, 0])
         max_x = np.max(transformed_corners[:, 0])
         min_y = np.min(transformed_corners[:, 1])
@@ -480,19 +487,18 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         bbox_width = max_x - min_x
         bbox_height = max_y - min_y
         
-        # Bounding box가 원본 이미지 크기의 3배를 넘으면 비정상적
         if bbox_width > W_img * 3 or bbox_height > H_img * 3:
             print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
-        # 좌상단과 우하단이 뒤바뀐 경우 체크 (이미지가 뒤집힘)
-        # 정상적인 경우: min_x < max_x, min_y < max_y
+        # 5. 좌상단과 우하단이 뒤바뀐 경우 체크 (이미지가 뒤집힘)
         if min_x > max_x or min_y > max_y:
             print(f"  Warning: Image {i+1}의 변환된 모서리가 뒤바뀐 것 같습니다 (이미지가 뒤집힘).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
+        # 모든 검증 통과
         print(f"  Image {i+1} 변환 위치 (첫 번째 이미지 좌표계):")
         print(f"    좌상단: ({transformed_corners[0][0]:.1f}, {transformed_corners[0][1]:.1f})")
         print(f"    우하단: ({transformed_corners[3][0]:.1f}, {transformed_corners[3][1]:.1f})")
@@ -505,22 +511,10 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # 최적화: 이미지가 실제로 차지하는 영역만 처리
         # transformed_corners는 첫 번째 이미지 좌표계 기준
         # Canvas 좌표계로 변환하려면 adjustment를 더해야 함
-        # 첫 번째 이미지 좌표계의 (0, 0)은 Canvas 좌표계의 (height_adjustment, width_adjustment)에 해당
-        
-        # 비정상적인 corner 값 필터링 (Image 10 같은 경우 방지)
-        valid_corners_mask = ~(np.isnan(transformed_corners).any(axis=1) | np.isinf(transformed_corners).any(axis=1))
-        # 극단적으로 큰 값도 필터링
-        valid_corners_mask = valid_corners_mask & (np.abs(transformed_corners[:, 0]) < 1e6) & (np.abs(transformed_corners[:, 1]) < 1e6)
-        
-        if not np.any(valid_corners_mask):
-            print(f"  Warning: Image {i+1}의 변환된 모서리가 모두 비정상적. 이 이미지를 건너뜁니다.")
-            continue
-        
-        valid_corners = transformed_corners[valid_corners_mask]
-        min_x_first_coord = np.min(valid_corners[:, 0])
-        max_x_first_coord = np.max(valid_corners[:, 0])
-        min_y_first_coord = np.min(valid_corners[:, 1])
-        max_y_first_coord = np.max(valid_corners[:, 1])
+        min_x_first_coord = min_x
+        max_x_first_coord = max_x
+        min_y_first_coord = min_y
+        max_y_first_coord = max_y
         
         # Canvas 좌표계로 변환 (첫 번째 이미지 좌표계 → Canvas 좌표계)
         min_x_canvas = min_x_first_coord + width_adjustment
@@ -674,14 +668,15 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             center_y = H_img / 2.0
             
             # 원본 이미지 좌표에서 중심까지의 거리 계산
-            # x_img_clamped, y_img_clamped는 valid_canvas_mask 적용 전 상태이므로
-            # valid_canvas_mask로 필터링된 좌표를 사용
-            # x0, y0 등이 이미 valid_canvas_mask로 필터링되었으므로, 
-            # x_img_clamped와 y_img_clamped도 동일하게 필터링 필요
-            # 하지만 x_img_clamped는 이미 valid_mask로 필터링된 후 valid_canvas_mask로 다시 필터링된 x0와 길이가 같음
-            # 따라서 직접 계산
-            x_img_filtered = x_img_clamped[valid_canvas_mask]
-            y_img_filtered = y_img_clamped[valid_canvas_mask]
+            # x_img_clamped, y_img_clamped는 valid_mask로 이미 필터링된 상태
+            # valid_canvas_mask로 다시 필터링하여 x0, y0, wx, wy와 동일한 길이로 맞춤
+            # 인덱스 일관성 보장: valid_mask → valid_canvas_mask 순서로 필터링
+            x_img_filtered = x_img_clamped  # 이미 valid_mask로 필터링됨
+            y_img_filtered = y_img_clamped  # 이미 valid_mask로 필터링됨
+            
+            # valid_canvas_mask 적용 (x0, y0와 동일한 순서로 필터링)
+            x_img_filtered = x_img_filtered[valid_canvas_mask]
+            y_img_filtered = y_img_filtered[valid_canvas_mask]
             
             # 거리 계산 (정규화: 최대 거리 = 대각선 길이)
             max_dist = np.sqrt(center_x**2 + center_y**2)

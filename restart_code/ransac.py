@@ -108,12 +108,17 @@ def ransac_homography(points1: np.ndarray,
     
     # 최소 Inlier 개수 미달 시
     if best_inlier_count < min_inliers:
-        # Fallback: 모든 점을 사용하여 계산
-        print(f"  Warning: RANSAC failed to find enough inliers ({best_inlier_count} < {min_inliers}). Using all points.")
-        H_fallback = compute_homography_dlt(points1, points2)
-        errors_fallback = compute_reprojection_error(points1, points2, H_fallback)
-        inlier_mask_fallback = errors_fallback < threshold * 2  # 더 넓은 threshold
-        return H_fallback, inlier_mask_fallback
+        # Fallback: RANSAC이 실패한 경우
+        # 모든 점을 사용하는 것은 outlier가 많을 때 위험하므로,
+        # 최선의 RANSAC 결과를 반환 (best_inlier_count가 0인 경우만 Identity)
+        if best_inlier_count == 0:
+            print(f"  Warning: RANSAC failed completely (0 inliers). Returning identity matrix.")
+            return np.eye(3, dtype=np.float32), np.zeros(N, dtype=bool)
+        else:
+            print(f"  Warning: RANSAC failed to find enough inliers ({best_inlier_count} < {min_inliers}).")
+            print(f"    Using best RANSAC result with {best_inlier_count} inliers.")
+            # 최선의 RANSAC 결과 반환 (비정상적일 수 있지만 Identity보다는 나음)
+            return best_H, best_inlier_mask
     
     # 6. 모든 Inlier로 Homography 재계산 (더 정확한 결과)
     if best_inlier_count > 4:
