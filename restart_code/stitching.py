@@ -234,6 +234,23 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             
             valid_transformed_corners = transformed_corners[valid_corners_mask]
             
+            # 뒤집힌 이미지 체크 (Canvas 크기 계산 전에 제외)
+            min_x = np.min(valid_transformed_corners[:, 0])
+            max_x = np.max(valid_transformed_corners[:, 0])
+            min_y = np.min(valid_transformed_corners[:, 1])
+            max_y = np.max(valid_transformed_corners[:, 1])
+            
+            if min_x > max_x or min_y > max_y:
+                print(f"  Warning: Image {i+1}의 변환된 모서리가 뒤바뀐 것 같습니다 (이미지가 뒤집힘). Canvas 계산에서 제외합니다.")
+                continue
+            
+            # Bounding box 크기 체크
+            bbox_width = max_x - min_x
+            bbox_height = max_y - min_y
+            if bbox_width > W_img * 5 or bbox_height > H_img * 5:
+                print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}). Canvas 계산에서 제외합니다.")
+                continue
+            
             # 추가 이상값 필터링: 더 관대한 기준 사용
             # 파노라마는 이미지들이 옆으로 확장될 수 있으므로, 더 넓은 범위 허용
             # 첫 번째 이미지 크기를 기준으로 사용 (모든 이미지 크기 누적은 실제 크기보다 훨씬 큼)
@@ -246,7 +263,7 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
                 final_valid_corners = valid_transformed_corners[distance_mask]
                 all_corners.append(final_valid_corners)
             else:
-                print(f"  Warning: Image {i+1}의 변환된 모서리가 distance_mask에서 제외됨. 이 이미지를 건너뜁니다.")
+                print(f"  Warning: Image {i+1}의 변환된 모서리가 distance_mask에서 제외됨. Canvas 계산에서 제외합니다.")
     
     # 모든 모서리 결합
     if len(all_corners) == 0:
@@ -282,8 +299,12 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     x_offset = 0  # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 x=0
     y_offset = 0  # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 y=0
     
-    # Padding 추가: 각 방향에 50픽셀 여유 공간 추가 (Ghost 현상 방지 및 안전한 배치)
-    padding = 50
+    # Padding 추가: 각 방향에 여유 공간 추가 (Ghost 현상 방지 및 안전한 배치)
+    # 실제 이미지 범위를 기반으로 적응적 padding 적용
+    actual_range_width = bounds_max_x - bounds_min_x
+    actual_range_height = bounds_max_y - bounds_min_y
+    # 작은 범위는 작은 padding, 큰 범위는 큰 padding (최소 20, 최대 100)
+    padding = max(20, min(100, int(max(actual_range_width, actual_range_height) / 100)))
     
     # width_adjustment와 height_adjustment 계산
     # 첫 번째 이미지 좌표계에서 (0, 0) = Canvas 좌표계에서 (height_adjustment, width_adjustment)
@@ -399,8 +420,13 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     
     print(f"Canvas 크기: {W_canvas}x{H_canvas} 픽셀")
     print(f"  실제 이미지 범위: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
+    print(f"  실제 필요한 크기: {int(bounds_max_x - bounds_min_x) + 1}x{int(bounds_max_y - bounds_min_y) + 1}")
     print(f"  첫 번째 이미지 Canvas 위치: ({width_adjustment}, {height_adjustment})")
-    print(f"  Padding: 50픽셀 (각 방향)")
+    # padding 값을 다시 읽어서 출력 (적응적 padding 적용됨)
+    actual_range_width = bounds_max_x - bounds_min_x
+    actual_range_height = bounds_max_y - bounds_min_y
+    adaptive_padding = max(20, min(100, int(max(actual_range_width, actual_range_height) / 100)))
+    print(f"  Padding: {adaptive_padding}픽셀 (각 방향, 적응적)")
     print(f"Offset: ({x_offset}, {y_offset})")
     print(f"중앙 이미지 인덱스: {center_idx + 1} (0-based: {center_idx})")
     print()
@@ -467,12 +493,11 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     for i in range(1, len(images)):
         # images[i]를 첫 번째 이미지 좌표계로 변환하는 Homography
         # (i >= 1이므로 첫 번째 이미지 체크 불필요)
-        # global_homographies[i]: images[i] → 중앙
-        # H_center_to_first: 중앙 → 첫 번째
-        if center_idx > 0:
-            H_to_first = H_center_to_first @ global_homographies[i]
-        else:
-            H_to_first = global_homographies[i]
+        # global_homographies[i]: images[i] → 중앙 좌표계
+        # H_center_to_first: 중앙 좌표계 → 첫 번째 이미지 좌표계
+        # H_to_first = H_center_to_first @ global_homographies[i]: images[i] → 첫 번째 이미지 좌표계
+        # center_idx == 0일 때도 H_center_to_first는 Identity이므로 동일한 방식으로 계산 가능
+        H_to_first = H_center_to_first @ global_homographies[i]
         
         # Homography 정규화
         if abs(H_to_first[2, 2]) > 1e-10:
@@ -523,24 +548,26 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
-        # 4. Bounding box 크기 체크
+        # 4. 좌상단과 우하단이 뒤바뀐 경우 체크 (이미지가 뒤집힘) - 먼저 체크
         min_x = np.min(transformed_corners[:, 0])
         max_x = np.max(transformed_corners[:, 0])
         min_y = np.min(transformed_corners[:, 1])
         max_y = np.max(transformed_corners[:, 1])
         
+        # 뒤집힌 이미지는 bounding box 크기 계산 전에 제외
+        if min_x > max_x or min_y > max_y:
+            print(f"  Warning: Image {i+1}의 변환된 모서리가 뒤바뀐 것 같습니다 (이미지가 뒤집힘).")
+            print(f"    좌상단: ({min_x:.1f}, {min_y:.1f}), 우하단: ({max_x:.1f}, {max_y:.1f})")
+            print(f"    이 이미지를 건너뜁니다.")
+            continue
+        
+        # 5. Bounding box 크기 체크 (뒤집힘 체크 통과 후)
         bbox_width = max_x - min_x
         bbox_height = max_y - min_y
         
         # 파노라마는 이미지들이 옆으로 확장될 수 있으므로 더 관대한 기준 사용
         if bbox_width > W_img * 5 or bbox_height > H_img * 5:  # 3 → 5로 완화
             print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 너무 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
-            print(f"    이 이미지를 건너뜁니다.")
-            continue
-        
-        # 5. 좌상단과 우하단이 뒤바뀐 경우 체크 (이미지가 뒤집힘)
-        if min_x > max_x or min_y > max_y:
-            print(f"  Warning: Image {i+1}의 변환된 모서리가 뒤바뀐 것 같습니다 (이미지가 뒤집힘).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
@@ -620,11 +647,13 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         y_img_all = (points_img_homogeneous[:, 1] / w_safe).reshape(y_coords.shape, order='C')
         
         # 6. 경계 마스크 생성 (벡터화)
-        # 경계를 엄격하게 체크하여 Streaking 방지 (margin 제거)
-        # valid_mask는 이미지 내부에 있는 픽셀만 True
+        # 경계를 엄격하게 체크하여 Streaking 방지
+        # Bilinear interpolation을 위해서는 x0, x1, y0, y1 모두 유효한 인덱스여야 함
+        # x1 = x0 + 1이므로, x0 <= W_img - 2까지 가능해야 x1 <= W_img - 1
+        # 따라서 x_img_all < W_img - 1 (또는 x_img_all <= W_img - 2) 조건 필요
         valid_mask = valid_mask.reshape(y_coords.shape, order='C') & \
-                     (x_img_all >= 0.0) & (x_img_all < float(W_img - 1)) & \
-                     (y_img_all >= 0.0) & (y_img_all < float(H_img - 1))
+                     (x_img_all >= 0.0) & (x_img_all <= float(W_img - 2)) & \
+                     (y_img_all >= 0.0) & (y_img_all <= float(H_img - 2))
         
         # 디버깅: valid_mask 통계 출력
         total_region_pixels = valid_mask.size
