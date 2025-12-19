@@ -15,7 +15,82 @@ from utils import load_images_from_folder, rgb_to_grayscale, normalize_image, sa
 from corner_detection import harris_corner_detection
 from point_matching import compute_descriptors, match_features, get_matched_points
 from homography import compute_homography_dlt
+from ransac import ransac_homography
 from stitching import stitch_multiple_images
+
+
+def filter_by_spatial_distribution(image1: np.ndarray,
+                                   image2: np.ndarray,
+                                   corners1: np.ndarray, 
+                                   corners2: np.ndarray, 
+                                   matches: List[Tuple[int, int]],
+                                   grid_size: int = 3) -> List[Tuple[int, int]]:
+    """
+    매칭된 점들이 이미지 전체에 고르게 분포하도록 필터링합니다.
+    
+    Args:
+        image1: 첫 번째 이미지 (H1, W1, 3) - 실제 이미지 크기 확인용
+        image2: 두 번째 이미지 (H2, W2, 3) - 실제 이미지 크기 확인용
+        corners1: 첫 번째 이미지의 코너 점들 (N1, 2)
+        corners2: 두 번째 이미지의 코너 점들 (N2, 2)
+        matches: 매칭 결과 리스트 [(idx1, idx2), ...]
+        grid_size: 그리드 크기 (int, 기본값: 3, 3x3 = 9개 영역)
+    
+    Returns:
+        filtered_matches: 필터링된 매칭 리스트
+    """
+    if len(matches) < grid_size * grid_size:
+        return matches
+    
+    # 실제 이미지 크기 사용
+    H1, W1 = image1.shape[:2]
+    H2, W2 = image2.shape[:2]
+    
+    # 그리드 경계 계산
+    cell_w1 = W1 / grid_size
+    cell_h1 = H1 / grid_size
+    cell_w2 = W2 / grid_size
+    cell_h2 = H2 / grid_size
+    
+    # 각 매칭을 그리드 셀에 분류
+    grid_cells = {}  # (cell_row, cell_col) -> [match indices]
+    
+    for i, (idx1, idx2) in enumerate(matches):
+        corner1 = corners1[idx1]
+        corner2 = corners2[idx2]
+        
+        # 각 이미지에서의 그리드 위치
+        cell_col1 = int(corner1[0] / cell_w1)
+        cell_row1 = int(corner1[1] / cell_h1)
+        cell_col2 = int(corner2[0] / cell_w2)
+        cell_row2 = int(corner2[1] / cell_h2)
+        
+        # 그리드 위치 클램핑
+        cell_col1 = min(cell_col1, grid_size - 1)
+        cell_row1 = min(cell_row1, grid_size - 1)
+        cell_col2 = min(cell_col2, grid_size - 1)
+        cell_row2 = min(cell_row2, grid_size - 1)
+        
+        # 두 이미지의 그리드 위치 평균 사용
+        cell_key = (cell_row1, cell_col1)  # 첫 번째 이미지 기준
+        
+        if cell_key not in grid_cells:
+            grid_cells[cell_key] = []
+        grid_cells[cell_key].append(i)
+    
+    # 각 그리드 셀에서 최대 개수 제한 (균등 분산)
+    max_per_cell = max(1, len(matches) // (grid_size * grid_size) + 2)
+    
+    filtered_indices = []
+    for cell_key, match_indices in grid_cells.items():
+        # 각 셀에서 최대 max_per_cell개만 선택
+        selected = match_indices[:max_per_cell]
+        filtered_indices.extend(selected)
+    
+    # 필터링된 매칭 반환
+    filtered_matches = [matches[i] for i in filtered_indices]
+    
+    return filtered_matches
 
 
 def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.ndarray:
@@ -66,8 +141,9 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     descriptors1 = compute_descriptors(gray1_norm, corners1, patch_size=21)
     descriptors2 = compute_descriptors(gray2_norm, corners2, patch_size=21)
     
-    # 5. Feature Matching
-    matches = match_features(descriptors1, descriptors2, threshold=0.7)
+    # 5. Feature Matching (threshold 완화하여 더 많은 후보 확보)
+    # 공간 분산을 위해 약간 완화된 threshold 사용
+    matches = match_features(descriptors1, descriptors2, threshold=0.75)
     print(f"  Matched features: {len(matches)}")
     
     if len(matches) < 4:
@@ -77,8 +153,42 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     # 6. 매칭된 점 좌표 추출
     points1, points2 = get_matched_points(corners1, corners2, matches)
     
-    # 7. Homography 계산 (image1 -> image2 변환)
-    H_1to2 = compute_homography_dlt(points1, points2)
+    # 6.5. 공간 분산 필터링: 매칭이 이미지 전체에 고르게 분포하도록 필터링
+    # 이미지를 3x3 그리드로 나누어 각 영역에서 균등하게 선택
+    # 단, 충분한 매칭이 있을 때만 적용하고, 필터링 후에도 충분한 매칭이 남아있어야 함
+    if len(matches) > 20:  # 충분한 매칭이 있을 때만 적용 (기준 완화: 12 → 20)
+        matches_filtered = filter_by_spatial_distribution(image1, image2, corners1, corners2, matches, grid_size=3)
+        # 필터링 후에도 최소 8개 이상의 매칭이 남아있어야 함 (RANSAC을 위해)
+        if len(matches_filtered) >= max(8, len(matches) * 0.3):  # 원래 매칭의 30% 이상
+            matches = matches_filtered
+            points1, points2 = get_matched_points(corners1, corners2, matches)
+            print(f"  After spatial filtering: {len(matches)} matches")
+    
+    # 7. RANSAC을 사용하여 Outlier 제거 및 Homography 계산
+    # image1 -> image2 변환 Homography 계산
+    # min_inliers를 동적으로 조정: 매칭 개수의 30% 또는 최소 4개
+    min_inliers = max(4, int(len(matches) * 0.3))
+    
+    H_1to2, inlier_mask = ransac_homography(
+        points1, points2,
+        max_iterations=2000,
+        threshold=3.0,  # 픽셀 단위 임계값
+        min_inliers=min_inliers
+    )
+    
+    inlier_count = np.sum(inlier_mask)
+    print(f"  RANSAC inliers: {inlier_count}/{len(matches)} ({100*inlier_count/len(matches):.1f}%)")
+    
+    if inlier_count < 4:
+        print(f"  Warning: Too few inliers after RANSAC ({inlier_count} < 4).")
+        # Identity 대신 RANSAC 결과를 사용 (아주 부정확하더라도 정보 보존)
+        # 단, 매우 비정상적인 경우에만 Identity 사용
+        if inlier_count == 0:
+            print(f"    No inliers found. Using identity matrix as last resort.")
+            return np.eye(3, dtype=np.float32)
+        else:
+            print(f"    Using RANSAC result despite low inlier count (may be inaccurate).")
+            # inlier_count가 0이 아니면 RANSAC 결과 사용
     
     # 8. 스티칭에는 image2를 image1로 변환하는 Homography가 필요하므로 역행렬 사용
     det = np.linalg.det(H_1to2)
@@ -89,6 +199,22 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         H = np.linalg.inv(H_1to2)
         if abs(H[2, 2]) > 1e-10:
             H = H / H[2, 2]  # 정규화
+        
+        # 9. Homography 검증: Scale factor 체크
+        scale_x = np.sqrt(H[0, 0]**2 + H[0, 1]**2)
+        scale_y = np.sqrt(H[1, 0]**2 + H[1, 1]**2)
+        
+        # 비정상적인 scale factor 검증
+        # Identity로 대체하는 대신 경고만 출력하고 계속 진행
+        # (Identity로 대체하면 이미지가 첫 번째 이미지 위치에 배치되어 더 큰 문제 발생)
+        if scale_x < 0.05 or scale_x > 20.0 or scale_y < 0.05 or scale_y > 20.0:
+            print(f"  Warning: Homography scale factor out of range (x: {scale_x:.2f}, y: {scale_y:.2f}).")
+            print(f"    계속 진행하지만 결과가 부정확할 수 있습니다.")
+            # Identity 대신 원래 Homography 사용 (결과는 부정확하지만 정보 손실 방지)
+        
+        # 10. 추가 검증: Inlier 비율 확인
+        if inlier_count < len(matches) * 0.3:  # Inlier 비율이 30% 미만
+            print(f"  Warning: Low inlier ratio ({100*inlier_count/len(matches):.1f}% < 30%). Result may be unreliable.")
     
     return H.astype(np.float32)
 
@@ -120,14 +246,17 @@ def main():
     메인 파이프라인 실행 함수
     """
     # 1. 이미지 로드
-    # testing1.jpg ~ testing10.jpg를 로컬 폴더에서 로드
+    # 사용자가 사용할 sampleset 폴더 이름을 여기에 지정하세요
+    sampleset_folder_name = "sampleset1"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
+    
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
-    img_folder = os.path.join(project_root, "img", "sampleset1")
+    img_folder = os.path.join(project_root, "img", sampleset_folder_name)
     
-    # 만약 sampleset1 폴더가 없으면 현재 디렉토리에서 찾기
     if not os.path.exists(img_folder):
-        img_folder = current_dir
+        print(f"이미지 폴더를 찾을 수 없습니다: {img_folder}")
+        print(f"코드에서 sampleset_folder_name을 확인해주세요: {sampleset_folder_name}")
+        return
     
     images = load_images_from_folder(img_folder)
     

@@ -21,20 +21,42 @@ def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
     """
     images = []
     
-    # testing1.jpg ~ testing10.jpg 순서대로 로드
-    for i in range(1, 11):
-        filename = f"testing{i}.jpg"
-        filepath = os.path.join(folder_path, filename)
-        
-        if os.path.exists(filepath):
-            img = cv2.imread(filepath)
-            if img is not None:
-                # BGR -> RGB 변환
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                images.append(img)
-        else:
-            # 파일이 없으면 다음 파일 시도
-            continue
+    # 폴더 안의 모든 jpg 파일 찾기
+    import glob
+    jpg_files = glob.glob(os.path.join(folder_path, "*.jpg"))
+    jpg_files.extend(glob.glob(os.path.join(folder_path, "*.JPG")))
+    
+    if len(jpg_files) == 0:
+        return images
+    
+    # Windows에서는 대소문자 구분 없이 중복 제거
+    # 정규화된 경로를 사용하여 중복 확인
+    seen_paths = set()
+    unique_files = []
+    for path in jpg_files:
+        normalized_path = os.path.normpath(os.path.normcase(path))
+        if normalized_path not in seen_paths:
+            seen_paths.add(normalized_path)
+            unique_files.append(path)
+    
+    jpg_files = unique_files
+    
+    # 파일명 기준으로 정렬 (testimg1.jpg, testimg2.jpg, ... 순서)
+    def natural_sort_key(path: str):
+        import re
+        filename = os.path.basename(path)
+        parts = re.split(r'(\d+)', filename)
+        return [int(c) if c.isdigit() else c.lower() for c in parts]
+    
+    jpg_files.sort(key=natural_sort_key)
+    
+    # 이미지 로드
+    for filepath in jpg_files:
+        img = cv2.imread(filepath)
+        if img is not None:
+            # BGR -> RGB 변환
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            images.append(img)
     
     return images
 

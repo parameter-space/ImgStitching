@@ -116,3 +116,30 @@ def compute_homography_dlt(points1: np.ndarray, points2: np.ndarray) -> np.ndarr
     
     return H.astype(np.float32)
 
+
+def apply_homography(points: np.ndarray, H: np.ndarray) -> np.ndarray:
+    """
+    Homography를 사용하여 점들을 변환합니다.
+    
+    Args:
+        points: 점들 (N, 2) - 각 행은 [x, y] - float32
+        H: Homography 행렬 (3, 3) - float32
+    
+    Returns:
+        transformed: 변환된 점들 (N, 2) - float32
+    """
+    N = len(points)
+    
+    # 동차 좌표로 변환
+    points_homogeneous = np.column_stack([points, np.ones(N)])
+    
+    # 변환
+    transformed_homogeneous = (H @ points_homogeneous.T).T
+    
+    # 일반 좌표로 변환
+    w = transformed_homogeneous[:, 2]
+    w = np.where(np.abs(w) < 1e-10, 1.0, w)  # 0으로 나누기 방지
+    transformed = transformed_homogeneous[:, :2] / w[:, np.newaxis]
+    
+    return transformed
+
