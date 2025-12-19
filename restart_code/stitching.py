@@ -123,17 +123,19 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     """
     모든 이미지를 포함할 수 있는 canvas 크기를 계산합니다.
     Center-Reference 방식을 사용하여 오차 분산.
+    중앙 이미지 좌표계를 기준으로 Canvas 크기를 계산합니다.
     
     Args:
         images: 이미지 리스트
         homographies: Homography 행렬 리스트
-        H_center_to_first: 중앙 이미지를 첫 번째 이미지 좌표계로 변환하는 Homography (선택적, 재사용 가능)
+        H_center_to_first: 사용하지 않음 (하위 호환성을 위해 유지, 무시됨)
     
     Returns:
         canvas_size: (height, width) - tuple
-        offset: (y_offset, x_offset) - tuple
+        offset: (y_offset, x_offset) - tuple (항상 (0, 0))
         adjustments: (height_adjustment, width_adjustment) - tuple
-        bounds: (min_x, max_x, min_y, max_y) - tuple
+                     중앙 이미지 좌표계의 (0, 0)이 Canvas 좌표계의 (height_adjustment, width_adjustment)에 위치
+        bounds: (min_x, max_x, min_y, max_y) - tuple (중앙 이미지 좌표계 기준)
     """
     # 합리적인 최대 canvas 크기 (메모리 보호용 체크)
     # 10만 픽셀 = 약 111GB RAM 필요 (float32, 3채널)
@@ -144,33 +146,14 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     global_homographies = compute_global_homographies_center_ref(homographies)
     center_idx = len(homographies) // 2
     
-    # 중앙 이미지를 첫 번째 이미지 좌표계로 변환하는 Homography
-    if H_center_to_first is None:
-        if center_idx > 0:
-            H_center_to_first = np.eye(3, dtype=np.float32)
-            # images[center_idx] → images[0] 변환
-            # 경로: images[center_idx] → images[center_idx-1] → ... → images[0]
-            # H[i]는 images[i+1] → images[i]이므로, 그대로 곱하면 됨
-            # H_center_to_first = H[center_idx-1] @ H[center_idx-2] @ ... @ H[0]
-            for j in range(center_idx - 1, -1, -1):  # j = center_idx-1, center_idx-2, ..., 0 (역순)
-                # Identity Homography 체크
-                if np.allclose(homographies[j], np.eye(3, dtype=np.float32), atol=1e-6):
-                    continue
-                H = homographies[j]
-                # H[j]는 images[j+1] → images[j]이므로 그대로 사용
-                H_center_to_first = H_center_to_first @ H
-        else:
-            H_center_to_first = np.eye(3, dtype=np.float32)
+    # 중앙 이미지 크기 (Canvas 크기 계산용)
+    H_center, W_center = images[center_idx].shape[:2]
     
-    # 첫 번째 이미지를 기준으로 설정
-    H0, W0 = images[0].shape[:2]
+    # max_reasonable_distance 계산용: 중앙 이미지 크기를 기준으로 사용
+    base_width = W_center
+    base_height = H_center
     
-    # max_reasonable_distance 계산용: 첫 번째 이미지 크기를 기준으로 사용
-    # 모든 이미지 크기를 누적하면 실제 파노라마 크기보다 훨씬 크므로, 첫 번째 이미지 크기만 사용
-    base_width = W0
-    base_height = H0
-    
-    # 모든 이미지의 변환된 모서리 계산
+    # 모든 이미지의 변환된 모서리 계산 (중앙 이미지 좌표계 기준)
     all_corners = []
     
     for i, img in enumerate(images):
@@ -184,43 +167,36 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             [W_img - 1, H_img - 1]
         ], dtype=np.float32)
         
-        # images[i]를 첫 번째 이미지 좌표계로 변환
-        if i == 0:
-            # 첫 번째 이미지는 Identity (자기 자신의 좌표계)
-            # 첫 번째 이미지는 항상 포함되어야 하므로 Identity 체크를 스킵
-            H_to_first = np.eye(3, dtype=np.float32)
-        else:
-            # global_homographies[i]: images[i] → 중앙 좌표계
-            # H_center_to_first: 중앙 좌표계 → 첫 번째 이미지 좌표계
-            H_to_first = H_center_to_first @ global_homographies[i]
-            
-            # Homography 정규화
-            if abs(H_to_first[2, 2]) > 1e-10:
-                H_to_first = H_to_first / H_to_first[2, 2]
-            
-            # 비정상적인 Homography 검증 (극단적인 경우만 제외)
-            scale_x = np.sqrt(H_to_first[0, 0]**2 + H_to_first[0, 1]**2)
-            scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
-            
-            # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
-            # 100배 이상 확대/축소는 비정상적
-            if scale_x > 100.0 or scale_y > 100.0 or scale_x < 0.001 or scale_y < 0.001:  # 50 → 100, 0.01 → 0.001로 완화
-                print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
-                print(f"    이 이미지를 Canvas 계산에서 제외합니다.")
-                # Identity로 대체하지 않고 이 이미지를 건너뜀
-                continue
-            
-            # Identity Homography 체크 (첫 번째 이미지가 아닌 경우만, Canvas 크기 계산에서 제외)
-            if np.allclose(H_to_first, np.eye(3, dtype=np.float32), atol=1e-6):
-                print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
-                print(f"    Canvas 계산에서 제외합니다.")
-                continue
+        # images[i]를 중앙 이미지 좌표계로 변환
+        # global_homographies[i]: images[i] → 중앙 이미지 좌표계
+        H_to_center = global_homographies[i]
         
-        transformed_corners = apply_homography(img_corners, H_to_first)
+        # Homography 정규화
+        if abs(H_to_center[2, 2]) > 1e-10:
+            H_to_center = H_to_center / H_to_center[2, 2]
         
-        # 첫 번째 이미지는 항상 포함 (Identity이므로 원본 corner와 동일)
-        if i == 0:
-            # 첫 번째 이미지는 항상 추가 (검증 불필요)
+        # 비정상적인 Homography 검증 (극단적인 경우만 제외)
+        scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
+        scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
+        
+        # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
+        # 100배 이상 확대/축소는 비정상적
+        if scale_x > 100.0 or scale_y > 100.0 or scale_x < 0.001 or scale_y < 0.001:
+            print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
+            print(f"    이 이미지를 Canvas 계산에서 제외합니다.")
+            continue
+        
+        # Identity Homography 체크 (중앙 이미지가 아닌 경우만, Canvas 크기 계산에서 제외)
+        if i != center_idx and np.allclose(H_to_center, np.eye(3, dtype=np.float32), atol=1e-6):
+            print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
+            print(f"    Canvas 계산에서 제외합니다.")
+            continue
+        
+        transformed_corners = apply_homography(img_corners, H_to_center)
+        
+        # 중앙 이미지는 항상 포함 (Identity이므로 원본 corner와 동일)
+        if i == center_idx:
+            # 중앙 이미지는 항상 추가 (검증 불필요)
             all_corners.append(transformed_corners)
         else:
             # 비정상적인 corner 값 필터링 (Image 10 같은 경우 방지)
@@ -267,37 +243,36 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     
     # 모든 모서리 결합
     if len(all_corners) == 0:
-        H0, W0 = images[0].shape[:2]
-        print(f"  Warning: all_corners가 비어있음. Fallback 사용: ({H0}, {W0})")
-        return (H0, W0), (0, 0), (0, 0), (0.0, float(W0-1), 0.0, float(H0-1))
+        print(f"  Warning: all_corners가 비어있음. Fallback 사용: ({H_center}, {W_center})")
+        return (H_center, W_center), (0, 0), (0, 0), (0.0, float(W_center-1), 0.0, float(H_center-1))
     
     all_corners = np.vstack(all_corners)
     
     # NaN/Inf 필터링
     valid_mask = ~(np.isnan(all_corners).any(axis=1) | np.isinf(all_corners).any(axis=1))
     if not np.any(valid_mask):
-        H0, W0 = images[0].shape[:2]
-        print(f"  Warning: 모든 모서리가 NaN/Inf. Fallback 사용: ({H0}, {W0})")
-        return (H0, W0), (0, 0), (0, 0), (0.0, float(W0-1), 0.0, float(H0-1))
+        print(f"  Warning: 모든 모서리가 NaN/Inf. Fallback 사용: ({H_center}, {W_center})")
+        return (H_center, W_center), (0, 0), (0, 0), (0.0, float(W_center-1), 0.0, float(H_center-1))
     
     all_corners = all_corners[valid_mask]
     
-    # Bounding box 계산 (모든 이미지의 모서리를 첫 번째 이미지 좌표계 기준으로 계산)
+    # Bounding box 계산 (모든 이미지의 모서리를 중앙 이미지 좌표계 기준으로 계산)
     # 변수명: bounds_min_x, bounds_max_x 등으로 명확하게 구분
     bounds_min_x = np.min(all_corners[:, 0])
     bounds_max_x = np.max(all_corners[:, 0])
     bounds_min_y = np.min(all_corners[:, 1])
     bounds_max_y = np.max(all_corners[:, 1])
     
-    # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 (0, 0)에 위치
-    # 다른 이미지가 첫 번째 이미지보다 위나 왼쪽에 있으면 bounds_min_x, bounds_min_y < 0일 수 있음
-    # 이 경우 첫 번째 이미지를 (0, 0)에 고정하고 Canvas를 확장해야 함
+    # 중앙 이미지는 항상 중앙 이미지 좌표계에서 (0, 0)에 위치
+    # 다른 이미지가 중앙 이미지보다 위나 왼쪽에 있으면 bounds_min_x, bounds_min_y < 0일 수 있음
+    # 이 경우 중앙 이미지를 Canvas 중앙에 배치하고 Canvas를 확장해야 함
     
     # Canvas 좌표계 설정:
-    # - 첫 번째 이미지 좌표계의 (0, 0) = Canvas 좌표계의 (height_adjustment, width_adjustment)
+    # - 중앙 이미지 좌표계의 (0, 0) = Canvas 좌표계의 (center_y_pos, center_x_pos)
+    # - 중앙 이미지를 Canvas 중앙에 배치하기 위해 조정
     # - bounds_min_x, bounds_min_y가 음수면 Canvas를 확장
-    x_offset = 0  # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 x=0
-    y_offset = 0  # 첫 번째 이미지는 항상 첫 번째 이미지 좌표계에서 y=0
+    x_offset = 0  # 중앙 이미지는 항상 중앙 이미지 좌표계에서 x=0
+    y_offset = 0  # 중앙 이미지는 항상 중앙 이미지 좌표계에서 y=0
     
     # Padding 추가: 각 방향에 여유 공간 추가 (Ghost 현상 방지 및 안전한 배치)
     # 실제 이미지 범위를 기반으로 적응적 padding 적용
@@ -306,50 +281,51 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     # 작은 범위는 작은 padding, 큰 범위는 큰 padding (최소 20, 최대 100)
     padding = max(20, min(100, int(max(actual_range_width, actual_range_height) / 100)))
     
-    # width_adjustment와 height_adjustment 계산
-    # 첫 번째 이미지 좌표계에서 (0, 0) = Canvas 좌표계에서 (height_adjustment, width_adjustment)
-    # bounds_min_x, bounds_min_y가 음수면 그만큼 Canvas를 왼쪽/위로 확장해야 함
-    if bounds_min_x < 0:
-        width_adjustment = -int(np.floor(bounds_min_x)) + padding  # 음수 부분 + padding
-    else:
-        width_adjustment = padding  # bounds_min_x >= 0이면 padding만 필요
-    
-    if bounds_min_y < 0:
-        height_adjustment = -int(np.floor(bounds_min_y)) + padding  # 음수 부분 + padding
-    else:
-        height_adjustment = padding  # bounds_min_y >= 0이면 padding만 필요
-    
-    # Canvas 크기 계산
-    # 실제 필요한 크기: (bounds_max_x - bounds_min_x) + 1 + padding * 2
-    # bounds_max_x는 첫 번째 이미지 좌표계 기준이므로, bounds_min_x를 고려해야 함
-    if bounds_min_x < 0:
-        # bounds_min_x가 음수면, 실제 범위는 bounds_max_x - bounds_min_x
-        actual_width = int(np.ceil(bounds_max_x - bounds_min_x)) + 1
-    else:
-        # bounds_min_x >= 0이면, 실제 범위는 bounds_max_x (첫 번째 이미지가 (0, 0)에서 시작)
-        actual_width = int(np.ceil(bounds_max_x)) + 1
-    
-    if bounds_min_y < 0:
-        # bounds_min_y가 음수면, 실제 범위는 bounds_max_y - bounds_min_y
-        actual_height = int(np.ceil(bounds_max_y - bounds_min_y)) + 1
-    else:
-        # bounds_min_y >= 0이면, 실제 범위는 bounds_max_y
-        actual_height = int(np.ceil(bounds_max_y)) + 1
+    # Canvas 크기 계산 (중앙 이미지 좌표계 기준)
+    # 실제 필요한 크기: (bounds_max_x - bounds_min_x) + 1
+    actual_width = int(np.ceil(bounds_max_x - bounds_min_x)) + 1
+    actual_height = int(np.ceil(bounds_max_y - bounds_min_y)) + 1
     
     # Canvas 크기 = 실제 필요한 크기 + padding * 2 (양쪽 끝)
     width = actual_width + padding * 2
     height = actual_height + padding * 2
     
+    # 중앙 이미지를 Canvas 중앙에 배치하기 위한 adjustment 계산
+    # 중앙 이미지 좌표계의 (0, 0) = Canvas 좌표계의 (height_adjustment, width_adjustment)
+    # 중앙 이미지 중심이 Canvas 중심에 오도록 배치:
+    # - 중앙 이미지 중심: (W_center/2, H_center/2) (중앙 이미지 좌표계)
+    # - Canvas 중심: (width/2, height/2) (Canvas 좌표계)
+    # - 중앙 이미지 중심이 Canvas 중심에 오려면:
+    #   width_adjustment = width/2 - W_center/2 = (width - W_center) / 2
+    #   height_adjustment = height/2 - H_center/2 = (height - H_center) / 2
+    
+    # 하지만 bounds를 모두 포함하면서 중앙 이미지 중심을 Canvas 중심에 배치하려면:
+    # - bounds_min_x < 0인 경우: 왼쪽으로 확장 필요
+    # - 중앙 이미지 좌표계의 (bounds_min_x, ...)가 Canvas의 (padding, ...)에 오려면:
+    #   width_adjustment = padding - bounds_min_x
+    # - 중앙 이미지 중심 기준: width_adjustment = (width - W_center) / 2
+    # - 두 조건을 모두 만족하려면 더 큰 값을 선택
+    
+    # 중앙 이미지 중심을 Canvas 중심에 최대한 가깝게 배치하면서 bounds를 모두 포함
+    ideal_center_x = (width - W_center) / 2
+    ideal_center_y = (height - H_center) / 2
+    
+    # bounds를 고려한 최소값
+    min_width_adjustment = padding - bounds_min_x if bounds_min_x < 0 else padding
+    min_height_adjustment = padding - bounds_min_y if bounds_min_y < 0 else padding
+    
+    # 두 조건 중 더 큰 값 선택 (모든 이미지를 포함하면서 중앙 이미지를 가능한 한 중앙에)
+    width_adjustment = max(int(ideal_center_x), int(min_width_adjustment))
+    height_adjustment = max(int(ideal_center_y), int(min_height_adjustment))
+    
     # Canvas 크기 검증
     if width <= 0 or height <= 0:
         print(f"  Warning: 계산된 Canvas 크기가 유효하지 않음 (width={width}, height={height})")
-        H0, W0 = images[0].shape[:2]
-        return (H0, W0), (0, 0), (0, 0), (0.0, float(W0-1), 0.0, float(H0-1))
+        return (H_center, W_center), (0, 0), (0, 0), (0.0, float(W_center-1), 0.0, float(H_center-1))
     
-    # 최소 크기 보장 (첫 번째 이미지가 들어갈 수 있어야 함)
-    H0, W0 = images[0].shape[:2]
-    min_required_width = W0 + width_adjustment
-    min_required_height = H0 + height_adjustment
+    # 최소 크기 보장 (중앙 이미지가 들어갈 수 있어야 함)
+    min_required_width = W_center + width_adjustment
+    min_required_height = H_center + height_adjustment
     if width < min_required_width:
         width = min_required_width
     if height < min_required_height:
@@ -393,35 +369,17 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     global_homographies = compute_global_homographies_center_ref(homographies)
     center_idx = len(homographies) // 2
     
-    # 첫 번째 이미지 좌표계로 변환하기 위한 Homography 계산
-    # 중앙 이미지를 첫 번째 이미지 좌표계로 변환하는 Homography
-    if center_idx > 0:
-        H_center_to_first = np.eye(3, dtype=np.float32)
-        # images[center_idx] → images[0] 변환
-        # 경로: images[center_idx] → images[center_idx-1] → ... → images[0]
-        # H[i]는 images[i+1] → images[i]이므로, 그대로 곱하면 됨
-        # H_center_to_first = H[center_idx-1] @ H[center_idx-2] @ ... @ H[0]
-        for j in range(center_idx - 1, -1, -1):  # j = center_idx-1, center_idx-2, ..., 0 (역순)
-            # Identity Homography 체크
-            if np.allclose(homographies[j], np.eye(3, dtype=np.float32), atol=1e-6):
-                continue
-            H = homographies[j]
-            # H[j]는 images[j+1] → images[j]이므로 그대로 사용
-            H_center_to_first = H_center_to_first @ H
-    else:
-        H_center_to_first = np.eye(3, dtype=np.float32)
-    
-    # Canvas 크기 계산 (전역 Homography 사용, H_center_to_first 재사용)
-    canvas_size, offset, adjustments, bounds = compute_canvas_size(images, homographies, H_center_to_first)
+    # Canvas 크기 계산 (중앙 이미지 좌표계 기준)
+    canvas_size, offset, adjustments, bounds = compute_canvas_size(images, homographies, None)
     H_canvas, W_canvas = canvas_size
     y_offset, x_offset = offset
     height_adjustment, width_adjustment = adjustments
     bounds_min_x, bounds_max_x, bounds_min_y, bounds_max_y = bounds
     
     print(f"Canvas 크기: {W_canvas}x{H_canvas} 픽셀")
-    print(f"  실제 이미지 범위: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
+    print(f"  실제 이미지 범위 (중앙 이미지 좌표계): x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
     print(f"  실제 필요한 크기: {int(bounds_max_x - bounds_min_x) + 1}x{int(bounds_max_y - bounds_min_y) + 1}")
-    print(f"  첫 번째 이미지 Canvas 위치: ({width_adjustment}, {height_adjustment})")
+    print(f"  중앙 이미지 Canvas 위치: ({width_adjustment}, {height_adjustment})")
     # padding 값을 다시 읽어서 출력 (적응적 padding 적용됨)
     actual_range_width = bounds_max_x - bounds_min_x
     actual_range_height = bounds_max_y - bounds_min_y
@@ -442,16 +400,16 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         print(f"    필요한 메모리: 약 {W_canvas * H_canvas * 3 * 4 / (1024**3):.2f} GB")
         raise ValueError(f"Canvas 크기가 너무 커서 메모리 할당 실패: {W_canvas}x{H_canvas}")
     
-    # 첫 번째 이미지 추가
-    # 첫 번째 이미지는 첫 번째 이미지 좌표계에서 (0, 0)에 위치
-    # Canvas 좌표계로 변환: 첫 번째 이미지 좌표계의 (0, 0) = Canvas 좌표계의 (height_adjustment, width_adjustment)
-    H0, W0 = images[0].shape[:2]
+    # 중앙 이미지 추가
+    # 중앙 이미지는 중앙 이미지 좌표계에서 (0, 0)에 위치
+    # Canvas 좌표계로 변환: 중앙 이미지 좌표계의 (0, 0) = Canvas 좌표계의 (height_adjustment, width_adjustment)
+    H_center, W_center = images[center_idx].shape[:2]
     
-    # Canvas 좌표계에서 첫 번째 이미지 위치 (항상 adjustment 위치에 배치)
+    # Canvas 좌표계에서 중앙 이미지 위치 (adjustment 위치에 배치)
     canvas_y_start = height_adjustment
-    canvas_y_end = canvas_y_start + H0
+    canvas_y_end = canvas_y_start + H_center
     canvas_x_start = width_adjustment
-    canvas_x_end = canvas_x_start + W0
+    canvas_x_end = canvas_x_start + W_center
     
     # Canvas 범위 내에서만 복사
     copy_y_start = max(0, canvas_y_start)
@@ -466,53 +424,51 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     src_x_end = src_x_start + (copy_x_end - copy_x_start)
     
     # 유효한 범위인지 확인 후 복사
-    # 첫 번째 이미지는 항상 Canvas 내에 있어야 하므로 추가 검증
+    # 중앙 이미지는 항상 Canvas 내에 있어야 하므로 추가 검증
     if copy_y_end > copy_y_start and copy_x_end > copy_x_start and \
-       src_y_end <= H0 and src_x_end <= W0 and \
+       src_y_end <= H_center and src_x_end <= W_center and \
        src_y_start >= 0 and src_x_start >= 0 and \
        canvas_y_start >= 0 and canvas_x_start >= 0:
-        # 첫 번째 이미지 복사 (가중치 1.0으로 처리)
+        # 중앙 이미지 복사 (가중치 1.0으로 처리)
         panorama[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = \
-            images[0][src_y_start:src_y_end, src_x_start:src_x_end].astype(np.float32)
+            images[center_idx][src_y_start:src_y_end, src_x_start:src_x_end].astype(np.float32)
         count[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
         # Weighted blending을 위한 가중치 합 (이미지 중심에서의 거리 기반)
-        # 간단하게 첫 번째 이미지는 가중치 1.0
+        # 간단하게 중앙 이미지는 가중치 1.0
         weight_sum[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
-        print(f"  첫 번째 이미지 배치 완료: Canvas 좌표 y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
+        print(f"  중앙 이미지 (Image {center_idx+1}) 배치 완료: Canvas 좌표 y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
     else:
-        print(f"  ERROR: 첫 번째 이미지 배치 실패")
+        print(f"  ERROR: 중앙 이미지 배치 실패")
         print(f"    Canvas 좌표: y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
         print(f"    Source 좌표: y=[{src_y_start}, {src_y_end}), x=[{src_x_start}, {src_x_end})")
-        print(f"    Image shape: {images[0].shape}")
+        print(f"    Image shape: {images[center_idx].shape}")
         print(f"    Adjustments: h={height_adjustment}, w={width_adjustment}")
         print(f"    Canvas 크기: {H_canvas}x{W_canvas}")
         print(f"    canvas_y_start={canvas_y_start}, canvas_x_start={canvas_x_start}")
         return None
     
-    # 나머지 이미지들 추가
-    for i in range(1, len(images)):
-        # images[i]를 첫 번째 이미지 좌표계로 변환하는 Homography
-        # (i >= 1이므로 첫 번째 이미지 체크 불필요)
-        # global_homographies[i]: images[i] → 중앙 좌표계
-        # H_center_to_first: 중앙 좌표계 → 첫 번째 이미지 좌표계
-        # H_to_first = H_center_to_first @ global_homographies[i]: images[i] → 첫 번째 이미지 좌표계
-        # center_idx == 0일 때도 H_center_to_first는 Identity이므로 동일한 방식으로 계산 가능
-        H_to_first = H_center_to_first @ global_homographies[i]
+    # 나머지 이미지들 추가 (중앙 이미지 제외)
+    for i in range(len(images)):
+        if i == center_idx:
+            continue  # 중앙 이미지는 이미 추가했으므로 건너뜀
+        # images[i]를 중앙 이미지 좌표계로 변환하는 Homography
+        # global_homographies[i]: images[i] → 중앙 이미지 좌표계
+        H_to_center = global_homographies[i]
         
         # Homography 정규화
-        if abs(H_to_first[2, 2]) > 1e-10:
-            H_to_first = H_to_first / H_to_first[2, 2]
+        if abs(H_to_center[2, 2]) > 1e-10:
+            H_to_center = H_to_center / H_to_center[2, 2]
         
         # Identity Homography 체크 (같은 위치에 stacking 방지)
-        if np.allclose(H_to_first, np.eye(3, dtype=np.float32), atol=1e-6):
+        if np.allclose(H_to_center, np.eye(3, dtype=np.float32), atol=1e-6):
             print(f"  Warning: Image {i+1}의 전역 Homography가 Identity입니다.")
-            print(f"    이전 이미지와 같은 위치에 배치되어 stacking이 발생할 수 있습니다.")
+            print(f"    중앙 이미지와 같은 위치에 배치되어 stacking이 발생할 수 있습니다.")
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
         # 비정상적인 Homography 검증 (극단적인 경우만 제외)
-        scale_x = np.sqrt(H_to_first[0, 0]**2 + H_to_first[0, 1]**2)
-        scale_y = np.sqrt(H_to_first[1, 0]**2 + H_to_first[1, 1]**2)
+        scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
+        scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
         
         # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
         # 100배 이상 확대/축소는 비정상적
@@ -525,7 +481,7 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         # 디버깅: 이미지 변환 위치 계산 및 검증
         img_corners = np.array([[0, 0], [W_img-1, 0], [0, H_img-1], [W_img-1, H_img-1]], dtype=np.float32)
-        transformed_corners = apply_homography(img_corners, H_to_first)
+        transformed_corners = apply_homography(img_corners, H_to_center)
         
         # 비정상적인 corner 값 검증 (통합 검증)
         # 1. NaN/Inf 체크
@@ -572,28 +528,28 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             continue
         
         # 모든 검증 통과
-        print(f"  Image {i+1} 변환 위치 (첫 번째 이미지 좌표계):")
+        print(f"  Image {i+1} 변환 위치 (중앙 이미지 좌표계):")
         print(f"    좌상단: ({transformed_corners[0][0]:.1f}, {transformed_corners[0][1]:.1f})")
         print(f"    우하단: ({transformed_corners[3][0]:.1f}, {transformed_corners[3][1]:.1f})")
         
-        # 역변환: 첫 번째 이미지 좌표계 → images[i] 좌표계
-        H_inv = np.linalg.inv(H_to_first)
+        # 역변환: 중앙 이미지 좌표계 → images[i] 좌표계
+        H_inv = np.linalg.inv(H_to_center)
         if abs(H_inv[2, 2]) > 1e-10:
             H_inv = H_inv / H_inv[2, 2]
         
         # 최적화: 이미지가 실제로 차지하는 영역만 처리
-        # transformed_corners는 첫 번째 이미지 좌표계 기준
+        # transformed_corners는 중앙 이미지 좌표계 기준
         # Canvas 좌표계로 변환하려면 adjustment를 더해야 함
-        min_x_first_coord = min_x
-        max_x_first_coord = max_x
-        min_y_first_coord = min_y
-        max_y_first_coord = max_y
+        min_x_center_coord = min_x
+        max_x_center_coord = max_x
+        min_y_center_coord = min_y
+        max_y_center_coord = max_y
         
-        # Canvas 좌표계로 변환 (첫 번째 이미지 좌표계 → Canvas 좌표계)
-        min_x_canvas = min_x_first_coord + width_adjustment
-        max_x_canvas = max_x_first_coord + width_adjustment
-        min_y_canvas = min_y_first_coord + height_adjustment
-        max_y_canvas = max_y_first_coord + height_adjustment
+        # Canvas 좌표계로 변환 (중앙 이미지 좌표계 → Canvas 좌표계)
+        min_x_canvas = min_x_center_coord + width_adjustment
+        max_x_canvas = max_x_center_coord + width_adjustment
+        min_y_canvas = min_y_center_coord + height_adjustment
+        max_y_canvas = max_y_center_coord + height_adjustment
         
         # Canvas 범위 내로 클램핑
         y_start = max(0, int(np.floor(min_y_canvas)) - 5)  # 여유 5픽셀
@@ -619,7 +575,7 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             indexing='ij'
         )
         
-        # 2. Canvas 좌표 → 첫 번째 이미지 좌표계 변환 (벡터화)
+        # 2. Canvas 좌표 → 중앙 이미지 좌표계 변환 (벡터화)
         x_canvas = x_coords - width_adjustment
         y_canvas = y_coords - height_adjustment
         
