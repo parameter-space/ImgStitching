@@ -9,7 +9,7 @@ from homography import apply_homography
 def bilinear_interpolate(image: np.ndarray, x: float, y: float) -> np.ndarray:
     """
     Bilinear interpolation을 사용하여 이미지에서 값을 샘플링합니다.
-    경계 밖에서는 가장 가까운 경계 픽셀 값을 반환합니다 (edge clamping).
+    경계 밖이면 0을 반환합니다 (edge clamping 제거로 Streaking 방지).
     
     Args:
         image: 이미지 (H, W) 또는 (H, W, C) - float32 또는 uint8
@@ -17,13 +17,16 @@ def bilinear_interpolate(image: np.ndarray, x: float, y: float) -> np.ndarray:
         y: y 좌표 (float)
     
     Returns:
-        value: 샘플링된 값 (C,) 또는 스칼라
+        value: 샘플링된 값 (C,) 또는 스칼라, 경계 밖이면 0
     """
     H, W = image.shape[:2]
     
-    # 경계 밖이면 가장 가까운 경계로 제한 (edge clamping)
-    x = max(0.0, min(float(W - 1), x))
-    y = max(0.0, min(float(H - 1), y))
+    # 경계 밖이면 0 반환 (Streaking 방지)
+    if x < 0.0 or x >= float(W - 1) or y < 0.0 or y >= float(H - 1):
+        if len(image.shape) == 3:
+            return np.zeros(image.shape[2], dtype=image.dtype)
+        else:
+            return 0.0
     
     # 정수 좌표
     x0 = int(np.floor(x))
@@ -133,7 +136,9 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
         bounds: (min_x, max_x, min_y, max_y) - tuple
     """
     # 합리적인 최대 canvas 크기 (메모리 보호용 체크)
-    MAX_REASONABLE_SIZE = 100000  # 경고만 출력, 실제로는 제한하지 않음
+    # 10만 픽셀 = 약 111GB RAM 필요 (float32, 3채널)
+    # 현실적인 한계로 25000으로 설정 (약 7GB RAM)
+    MAX_REASONABLE_SIZE = 25000
     
     # 중앙 이미지 기준 전역 Homography 계산
     global_homographies = compute_global_homographies_center_ref(homographies)
@@ -287,11 +292,17 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     if height < min_required_height:
         height = min_required_height
     
-    # 크기가 비정상적으로 크면 경고
+    # 크기가 비정상적으로 크면 제한 및 경고
     if width > MAX_REASONABLE_SIZE or height > MAX_REASONABLE_SIZE:
         print(f"  ERROR: Canvas 크기가 비정상적으로 큼 ({width}x{height}).")
         print(f"    이는 Homography 계산 오류를 의미할 수 있습니다.")
-        raise ValueError(f"Canvas 크기가 너무 큼: {width}x{height}. Homography 계산을 확인해주세요.")
+        print(f"    최대 크기로 제한합니다: {MAX_REASONABLE_SIZE}")
+        # 메모리 보호를 위해 최대 크기로 제한
+        width = min(width, MAX_REASONABLE_SIZE)
+        height = min(height, MAX_REASONABLE_SIZE)
+        # bounds도 조정
+        bounds_max_x = min(bounds_max_x, float(width - width_adjustment - 1))
+        bounds_max_y = min(bounds_max_y, float(height - height_adjustment - 1))
     
     return (height, width), (y_offset, x_offset), (height_adjustment, width_adjustment), (bounds_min_x, bounds_max_x, bounds_min_y, bounds_max_y)
 
@@ -346,9 +357,16 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     print(f"중앙 이미지 인덱스: {center_idx + 1} (0-based: {center_idx})")
     print()
     
-    # Canvas 초기화
-    panorama = np.zeros((H_canvas, W_canvas, 3), dtype=np.float32)
-    count = np.zeros((H_canvas, W_canvas), dtype=np.float32)
+    # Canvas 초기화 (메모리 할당 실패 감지)
+    try:
+        panorama = np.zeros((H_canvas, W_canvas, 3), dtype=np.float32)
+        count = np.zeros((H_canvas, W_canvas), dtype=np.float32)
+        # Weighted blending을 위한 가중치 합 배열
+        weight_sum = np.zeros((H_canvas, W_canvas), dtype=np.float32)
+    except MemoryError:
+        print(f"  ERROR: 메모리 부족 - Canvas 크기가 너무 큼 ({W_canvas}x{H_canvas})")
+        print(f"    필요한 메모리: 약 {W_canvas * H_canvas * 3 * 4 / (1024**3):.2f} GB")
+        raise ValueError(f"Canvas 크기가 너무 커서 메모리 할당 실패: {W_canvas}x{H_canvas}")
     
     # 첫 번째 이미지 추가
     # 첫 번째 이미지는 첫 번째 이미지 좌표계에서 (0, 0)에 위치
@@ -379,9 +397,13 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
        src_y_end <= H0 and src_x_end <= W0 and \
        src_y_start >= 0 and src_x_start >= 0 and \
        canvas_y_start >= 0 and canvas_x_start >= 0:
+        # 첫 번째 이미지 복사 (가중치 1.0으로 처리)
         panorama[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = \
             images[0][src_y_start:src_y_end, src_x_start:src_x_end].astype(np.float32)
         count[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
+        # Weighted blending을 위한 가중치 합 (이미지 중심에서의 거리 기반)
+        # 간단하게 첫 번째 이미지는 가중치 1.0
+        weight_sum[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
     else:
         print(f"  Warning: 첫 번째 이미지 배치 실패")
         print(f"    Canvas 좌표: y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
@@ -519,11 +541,11 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         y_img_all = (points_img_homogeneous[:, 1] / w_safe).reshape(y_coords.shape, order='C')
         
         # 6. 경계 마스크 생성 (벡터화)
-        # margin을 2.0으로 증가하여 경계 처리 완화
-        margin = 2.0
+        # 경계를 엄격하게 체크하여 Streaking 방지 (margin 제거)
+        # valid_mask는 이미지 내부에 있는 픽셀만 True
         valid_mask = valid_mask.reshape(y_coords.shape, order='C') & \
-                     (x_img_all >= -margin) & (x_img_all < W_img + margin) & \
-                     (y_img_all >= -margin) & (y_img_all < H_img + margin)
+                     (x_img_all >= 0.0) & (x_img_all < float(W_img - 1)) & \
+                     (y_img_all >= 0.0) & (y_img_all < float(H_img - 1))
         
         # 디버깅: valid_mask 통계 출력
         total_region_pixels = valid_mask.size
@@ -537,9 +559,10 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             print(f"        Homography가 부정확하거나 이미지가 처리 영역 밖에 있을 수 있습니다.")
         
         # 7. 벡터화된 bilinear interpolation
-        # valid_mask가 True인 픽셀만 처리
+        # valid_mask가 True인 픽셀만 처리 (경계 밖은 이미 필터링됨)
         if np.any(valid_mask):
-            # 경계 클램핑 (edge clamping)
+            # valid_mask로 이미 경계 내부 픽셀만 선택되었으므로 clamp 불필요
+            # 하지만 부동소수점 오차 방지를 위해 안전하게 클램핑
             x_img_clamped = np.clip(x_img_all[valid_mask], 0.0, float(W_img - 1))
             y_img_clamped = np.clip(y_img_all[valid_mask], 0.0, float(H_img - 1))
             
@@ -606,9 +629,37 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
                         wx * wy * img_float[y1, x1]
                 # value는 (N,) 형태
             
-            # 값 할당 (순서가 일치하므로 안전)
-            panorama[valid_y_coords, valid_x_coords] += value
+            # Weighted blending: 이미지 중심에서의 거리 기반 가중치 계산
+            # 이미지 중심 좌표 (원본 이미지 기준)
+            center_x = W_img / 2.0
+            center_y = H_img / 2.0
+            
+            # 원본 이미지 좌표에서 중심까지의 거리 계산
+            # x_img_clamped, y_img_clamped는 valid_canvas_mask 적용 전 상태이므로
+            # valid_canvas_mask로 필터링된 좌표를 사용
+            # x0, y0 등이 이미 valid_canvas_mask로 필터링되었으므로, 
+            # x_img_clamped와 y_img_clamped도 동일하게 필터링 필요
+            # 하지만 x_img_clamped는 이미 valid_mask로 필터링된 후 valid_canvas_mask로 다시 필터링된 x0와 길이가 같음
+            # 따라서 직접 계산
+            x_img_filtered = x_img_clamped[valid_canvas_mask]
+            y_img_filtered = y_img_clamped[valid_canvas_mask]
+            
+            # 거리 계산 (정규화: 최대 거리 = 대각선 길이)
+            max_dist = np.sqrt(center_x**2 + center_y**2)
+            distances = np.sqrt((x_img_filtered - center_x)**2 + (y_img_filtered - center_y)**2)
+            
+            # 가중치: 중심에 가까울수록 높은 가중치 (선형 감쇠)
+            # 거리가 멀수록 가중치 감소, 최소 0.1 보장
+            weights = np.maximum(1.0 - (distances / (max_dist + 1e-6)), 0.1)
+            
+            # 값 할당 (가중치 적용)
+            # Weighted sum: panorama += value * weight
+            if len(images[i].shape) == 3:
+                panorama[valid_y_coords, valid_x_coords] += value * weights[:, np.newaxis]
+            else:
+                panorama[valid_y_coords, valid_x_coords] += value * weights
             count[valid_y_coords, valid_x_coords] += 1.0
+            weight_sum[valid_y_coords, valid_x_coords] += weights
             
             # 실제 할당된 픽셀 수 디버깅
             assigned_pixels = len(valid_y_coords)
@@ -618,9 +669,11 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         print(f"      완료: Image {i+1} 처리 완료 (벡터화)" + " " * 30)  # 공백으로 이전 출력 지움
     
-    # 평균 계산 (blending)
-    mask = count > 0
-    panorama[mask] = panorama[mask] / count[mask, np.newaxis]
+    # Weighted blending: 가중치 합으로 나누기
+    mask = weight_sum > 1e-6  # 가중치 합이 0보다 큰 픽셀만
+    panorama[mask] = panorama[mask] / weight_sum[mask, np.newaxis]
+    
+    # 가중치 합이 0인 픽셀은 검은색으로 유지 (이미 0으로 초기화됨)
     
     return panorama.astype(np.uint8)
 
