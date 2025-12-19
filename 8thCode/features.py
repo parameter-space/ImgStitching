@@ -314,6 +314,7 @@ def compute_patch_descriptor(image: np.ndarray, corner: Tuple[int, int], patch_s
     """
     코너 주변의 패치를 디스크립터로 사용합니다.
     패치를 1D 벡터로 평탄화(flatten)하여 반환합니다.
+    조명 변화에 강건하도록 정규화합니다 (mean 제거, std로 나누기).
     
     Args:
         image: 그레이스케일 이미지 배열 (H, W) - float32
@@ -324,7 +325,17 @@ def compute_patch_descriptor(image: np.ndarray, corner: Tuple[int, int], patch_s
         descriptor: 패치 디스크립터 (patch_size * patch_size,) - float32
     """
     patch = extract_patch(image, corner, patch_size)
-    descriptor = patch.flatten().astype(np.float32)
+    patch_flat = patch.flatten().astype(np.float32)
+    
+    # Normalize: subtract mean, divide by std (robust against lighting changes)
+    mean = np.mean(patch_flat)
+    std = np.std(patch_flat)
+    if std > 1e-6:
+        descriptor = (patch_flat - mean) / std
+    else:
+        # Uniform patch (e.g., white wall) - return zero vector
+        descriptor = np.zeros_like(patch_flat)
+    
     return descriptor
 
 
@@ -393,8 +404,8 @@ def compute_ncc(descriptor1: np.ndarray, descriptor2: np.ndarray) -> float:
     if std1 == 0 or std2 == 0:
         return 0.0
     
-    # NCC 계산
-    ncc = np.sum(d1_centered * d2_centered) / (std1 * std2 * len(descriptor1))
+    # NCC 계산 (division by zero 방지를 위한 epsilon 추가)
+    ncc = np.sum(d1_centered * d2_centered) / (std1 * std2 * len(descriptor1) + 1e-6)
     return float(ncc)
 
 
@@ -507,8 +518,8 @@ def match_features(descriptors1: np.ndarray, descriptors2: np.ndarray,
                 d1_i = d1_centered[i:i+1, :]  # (1, D)
                 std1_i = std1[i, 0]
                 
-                # 상관계수 계산: (1, N2)
-                correlations = np.dot(d1_i, d2_centered.T) / (std1_i * std2.T * D)  # (1, N2)
+                # 상관계수 계산: (1, N2) (division by zero 방지를 위한 epsilon 추가)
+                correlations = np.dot(d1_i, d2_centered.T) / (std1_i * std2.T * D + 1e-6)  # (1, N2)
                 correlations = correlations.flatten()  # (N2,)
                 
                 sorted_indices = np.argsort(correlations)[::-1]  # 내림차순
@@ -527,8 +538,8 @@ def match_features(descriptors1: np.ndarray, descriptors2: np.ndarray,
         else:
             # 메모리가 충분하면 벡터화된 방식 사용
             # 상관계수 행렬 계산: (N1, N2)
-            # NCC = sum((d1 - μ1) * (d2 - μ2)) / (σ1 * σ2 * D)
-            correlations_matrix = np.dot(d1_centered, d2_centered.T) / (std1 * std2.T * D)
+            # NCC = sum((d1 - μ1) * (d2 - μ2)) / (σ1 * σ2 * D) (division by zero 방지를 위한 epsilon 추가)
+            correlations_matrix = np.dot(d1_centered, d2_centered.T) / (std1 * std2.T * D + 1e-6)
             
             for i in range(N1):
                 correlations = correlations_matrix[i]  # (N2,)
