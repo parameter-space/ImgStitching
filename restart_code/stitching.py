@@ -79,6 +79,8 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
     # 중앙 이미지 인덱스 (0-based)
     center_idx = N // 2  # 중앙 또는 중앙 근처
     
+    print(f"Global Homography 계산: 중앙 이미지 인덱스 = {center_idx} (이미지 {center_idx+1}번)")
+    
     global_homographies = []
     
     # 각 이미지를 중앙 이미지 좌표계로 변환하는 Homography 계산
@@ -86,21 +88,30 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
         if img_idx == center_idx:
             # 중앙 이미지는 Identity
             global_homographies.append(np.eye(3, dtype=np.float32))
+            print(f"  Image {img_idx+1}: Identity (중앙 이미지)")
         elif img_idx < center_idx:
             # 중앙보다 왼쪽: 역방향 누적
             # images[img_idx] → images[img_idx+1] → ... → images[center_idx]
             # H_global = H[img_idx]^-1 @ H[img_idx+1]^-1 @ ... @ H[center_idx-1]^-1
             H_to_center = np.eye(3, dtype=np.float32)
+            accumulated_indices = []
             for i in range(img_idx, center_idx):
                 # Identity Homography 체크
                 if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
                     # Identity는 누적에서 스킵 (역행렬도 Identity이므로)
                     continue
+                accumulated_indices.append(i)
                 H_inv = np.linalg.inv(homographies[i])
                 # 정규화
                 if abs(H_inv[2, 2]) > 1e-10:
                     H_inv = H_inv / H_inv[2, 2]
                 H_to_center = H_to_center @ H_inv
+            
+            # 검증: H_to_center가 올바른지 확인
+            scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
+            scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
+            print(f"  Image {img_idx+1}: 왼쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
+            
             global_homographies.append(H_to_center)
         else:
             # 중앙보다 오른쪽: 순방향 누적
@@ -113,18 +124,27 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             # H_global = H[img_idx-1] @ H[img_idx-2] @ ... @ H[center_idx]
             # 역순으로 누적해야 하므로 range를 역순으로
             H_to_center = np.eye(3, dtype=np.float32)
+            accumulated_indices = []
             for i in range(img_idx - 1, center_idx - 1, -1):  # img_idx-1부터 center_idx까지 역순
                 # Identity Homography 체크
                 if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
                     # Identity는 누적에서 스킵
                     continue
+                accumulated_indices.append(i)
                 H = homographies[i]
                 # 정규화
                 if abs(H[2, 2]) > 1e-10:
                     H = H / H[2, 2]
                 H_to_center = H_to_center @ H
+            
+            # 검증: H_to_center가 올바른지 확인
+            scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
+            scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
+            print(f"  Image {img_idx+1}: 오른쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
+            
             global_homographies.append(H_to_center)
     
+    print()
     return global_homographies
 
 
@@ -328,9 +348,16 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
     min_width_adjustment = padding - bounds_min_x
     min_height_adjustment = padding - bounds_min_y
     
+    # 디버그 출력
+    print(f"  ideal_center: x={ideal_center_x:.1f}, y={ideal_center_y:.1f}")
+    print(f"  min_adjustment: x={min_width_adjustment:.1f}, y={min_height_adjustment:.1f}")
+    print(f"  bounds: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
+    
     # 두 조건 중 더 큰 값 선택 (모든 이미지를 포함하면서 중앙 이미지를 가능한 한 중앙에)
     width_adjustment = max(int(ideal_center_x), int(min_width_adjustment))
     height_adjustment = max(int(ideal_center_y), int(min_height_adjustment))
+    
+    print(f"  최종 adjustment: x={width_adjustment}, y={height_adjustment}")
     
     # Canvas 크기 검증
     if width <= 0 or height <= 0:
@@ -549,11 +576,24 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         print(f"  Image {i+1} 변환 위치 (중앙 이미지 좌표계):")
         print(f"    좌상단: ({transformed_corners[0][0]:.1f}, {transformed_corners[0][1]:.1f})")
         print(f"    우하단: ({transformed_corners[3][0]:.1f}, {transformed_corners[3][1]:.1f})")
+        print(f"    범위: x=[{min_x:.1f}, {max_x:.1f}], y=[{min_y:.1f}, {max_y:.1f}]")
         
         # 역변환: 중앙 이미지 좌표계 → images[i] 좌표계
+        # 검증: H_to_center의 determinant 확인
+        det_H = np.linalg.det(H_to_center)
+        if abs(det_H) < 1e-5:
+            print(f"    Warning: Image {i+1}의 H_to_center determinant가 너무 작음 ({det_H:.2e}). 건너뜁니다.")
+            continue
+        
         H_inv = np.linalg.inv(H_to_center)
         if abs(H_inv[2, 2]) > 1e-10:
             H_inv = H_inv / H_inv[2, 2]
+        
+        # 역변환 검증: H_inv @ H_to_center가 Identity에 가까운지 확인
+        H_check = H_inv @ H_to_center
+        identity_error = np.max(np.abs(H_check - np.eye(3, dtype=np.float32)))
+        if identity_error > 1e-4:
+            print(f"    Warning: Image {i+1}의 H_inv 검증 실패 (identity_error={identity_error:.2e})")
         
         # 최적화: 이미지가 실제로 차지하는 영역만 처리
         # transformed_corners는 중앙 이미지 좌표계 기준
