@@ -1,178 +1,135 @@
 """
-유틸리티 함수 모듈
-이미지 로드, 저장, 그레이스케일 변환 등의 기본 기능
+기본 유틸리티 함수들
+이미지 I/O, 그레이스케일 변환, 정규화 등
 """
 
 import numpy as np
 import cv2
 import os
-import re
-from typing import List, Union
-
-
-def load_image(image_path: str) -> np.ndarray:
-    """
-    이미지 파일을 로드합니다.
-    
-    Args:
-        image_path: 이미지 파일 경로 (str)
-    
-    Returns:
-        image: BGR 형식의 이미지 배열 (H, W, 3) - uint8
-                주의: OpenCV는 BGR 순서로 이미지를 로드합니다 (RGB가 아님)
-    """
-    # cv2.imread: OpenCV의 이미지 로드 함수
-    # - 성공 시: (H, W, 3) numpy 배열 반환 (BGR 형식, uint8)
-    # - 실패 시: None 반환
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"이미지를 로드할 수 없습니다: {image_path}")
-    return image
+from typing import List
 
 
 def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
     """
-    폴더에서 모든 이미지를 로드합니다.
-    Natural Sort를 사용하여 올바른 순서로 정렬합니다.
+    폴더에서 이미지를 로드합니다.
     
     Args:
         folder_path: 이미지가 있는 폴더 경로 (str)
     
     Returns:
-        images: 이미지 배열 리스트 [image1, image2, ...]
-                각 이미지는 (H, W, 3) 형태 - uint8
+        images: 이미지 리스트 (List[np.ndarray]), 각 이미지는 (H, W, 3) 형태 - uint8
     """
-    import glob
-    
-    # 지원하는 이미지 확장자
-    extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif', 
-                  '*.JPG', '*.JPEG', '*.PNG', '*.BMP', '*.TIFF', '*.TIF']
-    image_paths = []
-    
-    # 모든 확장자로 검색
-    for ext in extensions:
-        paths = glob.glob(os.path.join(folder_path, ext))
-        image_paths.extend(paths)
-    
-    # 중복 제거
-    unique_paths = []
-    seen_paths = set()
-    for path in image_paths:
-        path_normalized = os.path.normpath(os.path.normcase(path))
-        if path_normalized not in seen_paths:
-            seen_paths.add(path_normalized)
-            unique_paths.append(path)
-    
-    # Natural Sort: 숫자가 포함된 파일명을 올바르게 정렬
-    # 예: "testimg1.jpg", "testimg2.jpg", "testimg10.jpg" 순서로 정렬
-    # ASCII 정렬은 "testimg10.jpg"가 "testimg2.jpg"보다 먼저 나오는 문제가 있음
-    def natural_sort_key(path: str) -> List[Union[int, str]]:
-        filename = os.path.basename(path)
-        # re.split(r'(\d+)', ...): 숫자와 비숫자를 분리
-        # 예: "testimg10.jpg" -> ["testimg", "10", ".jpg"]
-        parts = re.split(r'(\d+)', filename)
-        # 숫자는 int로, 문자는 소문자로 변환하여 정렬 키 생성
-        # 예: ["testimg", 10, ".jpg"] -> 정렬 시 숫자가 올바르게 비교됨
-        return [int(c) if c.isdigit() else c.lower() for c in parts]
-    
-    # sort(key=...): 정렬 키 함수를 사용하여 정렬
-    unique_paths.sort(key=natural_sort_key)
-    
     images = []
-    for path in unique_paths:
-        try:
-            img = load_image(path)
-            images.append(img)
-        except Exception as e:
-            print(f"경고: {path} 로드 실패: {e}")
+    
+    # testing1.jpg ~ testing10.jpg 순서대로 로드
+    for i in range(1, 11):
+        filename = f"testing{i}.jpg"
+        filepath = os.path.join(folder_path, filename)
+        
+        if os.path.exists(filepath):
+            img = cv2.imread(filepath)
+            if img is not None:
+                # BGR -> RGB 변환
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                images.append(img)
+        else:
+            # 파일이 없으면 다음 파일 시도
+            continue
     
     return images
 
 
 def rgb_to_grayscale(image: np.ndarray) -> np.ndarray:
     """
-    RGB/BGR 이미지를 그레이스케일로 변환합니다.
+    RGB 이미지를 그레이스케일로 변환합니다.
     
     Args:
-        image: BGR 형식의 이미지 배열 (H, W, 3) - uint8
+        image: RGB 이미지 (H, W, 3) - uint8
     
     Returns:
-        gray: 그레이스케일 이미지 배열 (H, W) - float32
+        gray: 그레이스케일 이미지 (H, W) - float32, 0~1 범위로 정규화
     """
+    # RGB -> Grayscale 변환 공식: Y = 0.299*R + 0.587*G + 0.114*B
     if len(image.shape) == 3:
-        # BGR to Grayscale 변환 (ITU-R BT.601 표준)
-        # 공식: Y = 0.299*R + 0.587*G + 0.114*B
-        # OpenCV는 BGR 순서이므로:
-        # - image[:, :, 0] = Blue 채널
-        # - image[:, :, 1] = Green 채널
-        # - image[:, :, 2] = Red 채널
-        # astype(np.float32): uint8 (0-255)를 float32로 변환 (계산 정확도 향상)
-        gray = 0.114 * image[:, :, 0].astype(np.float32) + \
+        gray = 0.299 * image[:, :, 0].astype(np.float32) + \
                0.587 * image[:, :, 1].astype(np.float32) + \
-               0.299 * image[:, :, 2].astype(np.float32)
+               0.114 * image[:, :, 2].astype(np.float32)
     else:
-        # 이미 그레이스케일인 경우
         gray = image.astype(np.float32)
+    
+    # 0~255 범위를 0~1로 정규화
+    gray = gray / 255.0
     
     return gray
 
 
-def save_image(image: np.ndarray, output_path: str) -> None:
+def normalize_image(image: np.ndarray) -> np.ndarray:
     """
-    이미지를 파일로 저장합니다.
+    이미지 정규화: 밝기 차이를 극복하기 위해 평균을 0, 표준편차를 1로 정규화합니다.
     
     Args:
-        image: 이미지 배열 (H, W) 또는 (H, W, 3) - uint8
-        output_path: 저장할 파일 경로 (str)
+        image: 그레이스케일 이미지 (H, W) - float32
+    
+    Returns:
+        normalized: 정규화된 이미지 (H, W) - float32
     """
-    cv2.imwrite(output_path, image)
+    mean = np.mean(image)
+    std = np.std(image)
+    
+    if std < 1e-10:  # 표준편차가 거의 0인 경우 (단색 이미지)
+        return image - mean
+    
+    normalized = (image - mean) / std
+    
+    return normalized
 
 
-def show_image(image: np.ndarray, window_name: str = "Image") -> None:
+def save_image(image: np.ndarray, filepath: str):
+    """
+    이미지를 저장합니다.
+    
+    Args:
+        image: 이미지 (H, W, 3) 또는 (H, W) - uint8 또는 float32
+        filepath: 저장 경로 (str)
+    """
+    # float32이고 0~1 범위면 uint8 0~255로 변환
+    if image.dtype == np.float32 or image.dtype == np.float64:
+        if image.max() <= 1.0:
+            image = (image * 255).astype(np.uint8)
+        else:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+    
+    # RGB -> BGR 변환 (OpenCV는 BGR 형식 사용)
+    if len(image.shape) == 3:
+        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    else:
+        image_bgr = image
+    
+    cv2.imwrite(filepath, image_bgr)
+
+
+def show_image(image: np.ndarray, window_name: str = "Image"):
     """
     이미지를 화면에 표시합니다.
     
     Args:
-        image: 이미지 배열 (H, W) 또는 (H, W, 3) - uint8
-        window_name: 윈도우 이름 (str)
+        image: 이미지 (H, W, 3) 또는 (H, W) - uint8 또는 float32
+        window_name: 창 이름 (str)
     """
-    # 유효성 검사: 이미지가 None이거나 크기가 0이면 표시하지 않음
-    if image is None:
-        print(f"경고: {window_name} 이미지가 None입니다.")
-        return
-    
-    # 이미지 크기 확인
-    if image.size == 0:
-        print(f"경고: {window_name} 이미지의 크기가 0입니다.")
-        return
-    
-    # 데이터 타입 확인 및 변환
-    if image.dtype != np.uint8:
-        print(f"경고: {window_name} 이미지의 데이터 타입이 uint8이 아닙니다 ({image.dtype}). 변환합니다.")
-        # float 타입인 경우 0-1 범위 또는 0-255 범위로 가정
-        if image.dtype in [np.float32, np.float64]:
-            if image.max() <= 1.0:
-                image = (image * 255).astype(np.uint8)
-            else:
-                image = np.clip(image, 0, 255).astype(np.uint8)
+    # float32이고 0~1 범위면 uint8 0~255로 변환
+    if image.dtype == np.float32 or image.dtype == np.float64:
+        if image.max() <= 1.0:
+            image = (image * 255).astype(np.uint8)
         else:
-            image = image.astype(np.uint8)
+            image = np.clip(image, 0, 255).astype(np.uint8)
     
-    # 이미지 shape 확인
-    if len(image.shape) not in [2, 3]:
-        print(f"경고: {window_name} 이미지의 차원이 올바르지 않습니다 (shape: {image.shape})")
-        return
+    # RGB -> BGR 변환
+    if len(image.shape) == 3:
+        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    else:
+        image_bgr = image
     
-    # 높이 또는 너비가 0이면 표시하지 않음
-    if image.shape[0] == 0 or image.shape[1] == 0:
-        print(f"경고: {window_name} 이미지의 크기가 0입니다 (shape: {image.shape})")
-        return
-    
-    try:
-        cv2.imshow(window_name, image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-    except cv2.error as e:
-        print(f"경고: {window_name} 이미지를 표시하는 중 오류가 발생했습니다: {e}")
-        print(f"  이미지 shape: {image.shape}, dtype: {image.dtype}")
+    cv2.imshow(window_name, image_bgr)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
