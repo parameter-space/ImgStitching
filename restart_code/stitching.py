@@ -91,11 +91,12 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             print(f"  Image {img_idx+1}: Identity (중앙 이미지)")
         elif img_idx < center_idx:
             # 중앙보다 왼쪽: 역방향 누적
-            # images[img_idx] → images[img_idx+1] → ... → images[center_idx]
-            # H_global = H[img_idx]^-1 @ H[img_idx+1]^-1 @ ... @ H[center_idx-1]^-1
+            # 계산식: x_center = H[center_idx-1]^-1 * H[center_idx-2]^-1 * ... * H[img_idx]^-1 * x_{img_idx}
+            # 중앙에 인접한 변환 행렬이 곱셈 결과의 가장 왼쪽에 위치해야 함
             H_to_center = np.eye(3, dtype=np.float32)
             accumulated_indices = []
-            for i in range(img_idx, center_idx):
+            # center_idx-1부터 img_idx까지 역순으로 돌면서 역행렬을 누적
+            for i in range(center_idx - 1, img_idx - 1, -1):
                 # Identity Homography 체크
                 if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
                     # Identity는 누적에서 스킵 (역행렬도 Identity이므로)
@@ -107,8 +108,8 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                 if abs(H_inv[2, 2]) > 1e-10:
                     H_inv = H_inv / H_inv[2, 2]
                 
-                # 누적
-                H_to_center = H_to_center @ H_inv
+                # 누적: 중앙에 가까운 변환 행렬이 왼쪽에 위치하도록
+                H_to_center = H_inv @ H_to_center
                 
                 # 누적 후 정규화 (오차 누적 방지)
                 if abs(H_to_center[2, 2]) > 1e-10:
@@ -132,17 +133,12 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             global_homographies.append(H_to_center)
         else:
             # 중앙보다 오른쪽: 순방향 누적
-            # images[img_idx] → images[img_idx-1] → ... → images[center_idx]
-            # H[i]는 images[i+1] → images[i]이므로,
-            # images[img_idx] → images[img_idx-1]은 H[img_idx-1]
-            # images[img_idx-1] → images[img_idx-2]는 H[img_idx-2]
-            # ...
-            # images[center_idx+1] → images[center_idx]는 H[center_idx]
-            # H_global = H[img_idx-1] @ H[img_idx-2] @ ... @ H[center_idx]
-            # 역순으로 누적해야 하므로 range를 역순으로
+            # 계산식: x_center = H[center_idx] * H[center_idx+1] * ... * H[img_idx-1] * x_{img_idx}
+            # 중앙에 인접한 변환 행렬이 곱셈 결과의 가장 왼쪽에 위치해야 함
             H_to_center = np.eye(3, dtype=np.float32)
             accumulated_indices = []
-            for i in range(img_idx - 1, center_idx - 1, -1):  # img_idx-1부터 center_idx까지 역순
+            # center_idx부터 img_idx-1까지 순방향으로 돌면서 정방향 행렬을 누적
+            for i in range(center_idx, img_idx):
                 # Identity Homography 체크
                 if np.allclose(homographies[i], np.eye(3, dtype=np.float32), atol=1e-6):
                     # Identity는 누적에서 스킵
@@ -154,7 +150,7 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                 if abs(H[2, 2]) > 1e-10:
                     H = H / H[2, 2]
                 
-                # 누적
+                # 누적: 중앙에 가까운 변환 행렬이 왼쪽에 위치하도록
                 H_to_center = H_to_center @ H
                 
                 # 누적 후 정규화 (오차 누적 방지)

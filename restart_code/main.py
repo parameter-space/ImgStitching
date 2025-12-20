@@ -14,7 +14,7 @@ from typing import List, Tuple
 from utils import load_images_from_folder, rgb_to_grayscale, normalize_image, save_image, show_image
 from corner_detection import harris_corner_detection
 from point_matching import compute_descriptors, match_features, get_matched_points
-from homography import compute_homography_dlt, apply_homography
+from homography import compute_homography_dlt, compute_homography_affine, interpolate_homography, apply_homography
 from ransac import ransac_homography
 from stitching import stitch_multiple_images
 
@@ -184,6 +184,66 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     if inlier_count < 4:
         print(f"  Warning: Low inlier count ({inlier_count} < 4). Result may be unreliable.")
     
+    # 7.5. Projective-Affine Interpolation (적응형 전략)
+    # Projective 변환의 과도한 왜곡(Scale Explosion)을 막기 위해
+    # 데이터가 불안정할 때 Affine 모델과 Projective 모델을 섞어서 안정성을 확보
+    
+    # Step 1: Projective H의 Scale 검사
+    # Scale은 determinant의 제곱근으로 계산 (Affine 성분의 평균 scale)
+    scale_x = np.sqrt(H_1to2[0, 0]**2 + H_1to2[0, 1]**2)
+    scale_y = np.sqrt(H_1to2[1, 0]**2 + H_1to2[1, 1]**2)
+    scale_avg = (scale_x + scale_y) / 2.0
+    
+    # Step 2: 적응형 전략 적용
+    use_interpolation = False
+    alpha = 0.3  # 기본값: Projective만 사용
+    
+    # Scale이 정상 범위(0.7 ~ 1.3)이고 Inlier가 충분하면 Projective 그대로 사용
+    if scale_avg < 0.7 or scale_avg > 1.3:
+        print(f"  Warning: Abnormal scale detected (avg: {scale_avg:.3f}, x: {scale_x:.3f}, y: {scale_y:.3f}).")
+        print(f"    Scale out of range [0.7, 1.3]. Applying Projective-Affine Interpolation...")
+        use_interpolation = True
+        # 왜곡이 심할수록 Affine에 가깝게 (alpha를 높게 설정)
+        if scale_avg < 0.5 or scale_avg > 2.0:
+            alpha = 1.0  # 극단적인 경우 완전히 Affine
+        elif scale_avg < 0.7 or scale_avg > 1.3:
+            alpha = 0.9  # 비정상적인 경우 거의 Affine
+    elif inlier_count < 10:
+        print(f"  Warning: Low inlier count ({inlier_count} < 10). Applying Projective-Affine Interpolation...")
+        use_interpolation = True
+        # Inlier가 부족할 때는 중간 정도 Affine에 가깝게
+        alpha = 0.7
+    
+    # Step 3: Interpolation 적용
+    if use_interpolation:
+        # 같은 Inlier 점들로 Affine Homography 계산
+        points1_inliers = points1[inlier_mask]
+        points2_inliers = points2[inlier_mask]
+        
+        if len(points1_inliers) >= 3:
+            try:
+                H_1to2_affine = compute_homography_affine(points1_inliers, points2_inliers)
+                
+                # Affine H의 Scale 검증
+                scale_x_affine = np.sqrt(H_1to2_affine[0, 0]**2 + H_1to2_affine[0, 1]**2)
+                scale_y_affine = np.sqrt(H_1to2_affine[1, 0]**2 + H_1to2_affine[1, 1]**2)
+                scale_avg_affine = (scale_x_affine + scale_y_affine) / 2.0
+                
+                print(f"    Affine H scale: {scale_avg_affine:.3f}, Interpolation alpha: {alpha:.2f}")
+                
+                # Interpolation 적용
+                H_1to2 = interpolate_homography(H_1to2, H_1to2_affine, alpha)
+                
+                # Interpolation 후 Scale 재검증
+                scale_x_interp = np.sqrt(H_1to2[0, 0]**2 + H_1to2[0, 1]**2)
+                scale_y_interp = np.sqrt(H_1to2[1, 0]**2 + H_1to2[1, 1]**2)
+                scale_avg_interp = (scale_x_interp + scale_y_interp) / 2.0
+                print(f"    Interpolated H scale: {scale_avg_interp:.3f}")
+            except Exception as e:
+                print(f"    Affine computation failed: {e}. Using original Projective H.")
+        else:
+            print(f"    Not enough inliers for Affine ({len(points1_inliers)} < 3). Using original Projective H.")
+    
     # 8. 스티칭에는 image2를 image1로 변환하는 Homography가 필요하므로 역행렬 사용
     det = np.linalg.det(H_1to2)
     if abs(det) < 1e-5:
@@ -297,7 +357,7 @@ def main():
     """
     # 1. 이미지 로드
     # 사용자가 사용할 sampleset 폴더 이름을 여기에 지정하세요
-    sampleset_folder_name = "sampleset1"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
+    sampleset_folder_name = "sampleset3"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
