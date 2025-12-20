@@ -12,6 +12,7 @@ from typing import List
 def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
     """
     폴더에서 이미지를 로드합니다.
+    지원하는 확장자: jpg, jpeg, png, bmp, tiff, tif (대소문자 구분 없음)
     
     Args:
         folder_path: 이미지가 있는 폴더 경로 (str)
@@ -21,37 +22,44 @@ def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
     """
     images = []
     
-    # 폴더 안의 모든 jpg 파일 찾기
+    # 폴더 안의 모든 이미지 파일 찾기 (다양한 확장자 지원)
     import glob
-    jpg_files = glob.glob(os.path.join(folder_path, "*.jpg"))
-    jpg_files.extend(glob.glob(os.path.join(folder_path, "*.JPG")))
+    # 지원하는 이미지 확장자 목록 (대소문자 모두)
+    image_extensions = ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG', 
+                       '*.png', '*.PNG', 
+                       '*.bmp', '*.BMP',
+                       '*.tiff', '*.TIFF', '*.tif', '*.TIF']
     
-    if len(jpg_files) == 0:
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(glob.glob(os.path.join(folder_path, ext)))
+    
+    if len(image_files) == 0:
         return images
     
     # Windows에서는 대소문자 구분 없이 중복 제거
     # 정규화된 경로를 사용하여 중복 확인
     seen_paths = set()
     unique_files = []
-    for path in jpg_files:
+    for path in image_files:
         normalized_path = os.path.normpath(os.path.normcase(path))
         if normalized_path not in seen_paths:
             seen_paths.add(normalized_path)
             unique_files.append(path)
     
-    jpg_files = unique_files
+    image_files = unique_files
     
-    # 파일명 기준으로 정렬 (testimg1.jpg, testimg2.jpg, ... 순서)
+    # 파일명 기준으로 정렬 (testimg1.jpg, testimg2.png, ... 순서)
     def natural_sort_key(path: str):
         import re
         filename = os.path.basename(path)
         parts = re.split(r'(\d+)', filename)
         return [int(c) if c.isdigit() else c.lower() for c in parts]
     
-    jpg_files.sort(key=natural_sort_key)
+    image_files.sort(key=natural_sort_key)
     
     # 이미지 로드
-    for filepath in jpg_files:
+    for filepath in image_files:
         img = cv2.imread(filepath)
         if img is not None:
             # BGR -> RGB 변환

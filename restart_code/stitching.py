@@ -295,16 +295,18 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             # 추가 이상값 필터링: 더 관대한 기준 사용
             # 파노라마는 이미지들이 옆으로 확장될 수 있으므로, 더 넓은 범위 허용
             # 중앙 이미지 크기를 기준으로 사용 (모든 이미지 크기 누적은 실제 크기보다 훨씬 큼)
-            max_reasonable_distance = max(base_width, base_height) * 5  # 3 → 5로 완화
+            max_reasonable_distance = max(base_width, base_height) * 30  # 5 → 30으로 더 완화
             # 벡터화된 필터링
-            distance_mask = (np.abs(valid_transformed_corners[:, 0]) < max_reasonable_distance) & \
-                           (np.abs(valid_transformed_corners[:, 1]) < max_reasonable_distance)
+            # 완화: 모든 corner가 아니라 대부분이 합리적이면 포함
+            corner_distances = np.sqrt(valid_transformed_corners[:, 0]**2 + valid_transformed_corners[:, 1]**2)
+            distance_mask = corner_distances <= max_reasonable_distance
             
-            if np.any(distance_mask):
+            # 4개 corner 중 3개 이상이 합리적 거리 내에 있으면 포함
+            if np.sum(distance_mask) >= 3:
                 final_valid_corners = valid_transformed_corners[distance_mask]
                 all_corners.append(final_valid_corners)
             else:
-                print(f"  Warning: Image {i+1}의 변환된 모서리가 distance_mask에서 제외됨. Canvas 계산에서 제외합니다.")
+                print(f"  Warning: Image {i+1}의 변환된 모서리가 distance_mask에서 제외됨 (유효: {np.sum(distance_mask)}/4). Canvas 계산에서 제외합니다.")
     
     # 모든 모서리 결합
     if len(all_corners) == 0:
@@ -546,8 +548,9 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
         
         # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
-        # 100배 이상 확대/축소는 비정상적
-        if scale_x > 100.0 or scale_y > 100.0 or scale_x < 0.001 or scale_y < 0.001:  # 50 → 100, 0.01 → 0.001로 완화
+        # 200배 이상 확대/축소는 비정상적 (더 완화: 100 → 200)
+        # scale이 0.0005 미만이면 너무 작음 (더 완화: 0.001 → 0.0005)
+        if scale_x > 200.0 or scale_y > 200.0 or scale_x < 0.0005 or scale_y < 0.0005:
             print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
             print(f"    이 이미지를 건너뜁니다.")
             continue
@@ -573,11 +576,16 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # 파노라마는 옆으로 확장될 수 있으므로 더 관대한 기준 사용
         # 중앙 이미지 기준으로 계산 (모든 이미지가 중앙 이미지 주변에 배치되어야 함)
         H_center, W_center = images[center_idx].shape[:2]
-        max_reasonable_distance = max(W_center, H_center) * 20  # 10 → 20으로 더 완화
+        max_reasonable_distance = max(W_center, H_center) * 30  # 20 → 30으로 더 완화
         corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
-        if np.any(corner_distances > max_reasonable_distance):
+        
+        # 완화된 체크: 모든 corner가 아니라 대부분의 corner가 합리적이면 포함
+        # 4개 corner 중 3개 이상이 합리적 거리 내에 있으면 포함
+        valid_corner_count = np.sum(corner_distances <= max_reasonable_distance)
+        if valid_corner_count < 3:  # 4개 중 3개 미만이면 제외
             max_dist = np.max(corner_distances)
             print(f"  Warning: Image {i+1}의 변환된 모서리가 너무 멀리 떨어져 있음 (최대 거리: {max_dist:.1f} > {max_reasonable_distance:.1f}).")
+            print(f"    유효 corner: {valid_corner_count}/4")
             print(f"    H_to_center scale: ({scale_x:.2f}, {scale_y:.2f})")
             print(f"    이 이미지를 건너뜁니다.")
             continue

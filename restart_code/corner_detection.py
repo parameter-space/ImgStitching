@@ -139,6 +139,8 @@ def harris_corner_detection(image: np.ndarray,
     R_padded = np.pad(R, nms_pad, mode='constant', constant_values=-np.inf)
     
     corners_list = []
+    corner_responses = []  # Response 값도 저장
+    
     for i in range(H):
         for j in range(W):
             if corner_mask[i, j]:
@@ -149,9 +151,23 @@ def harris_corner_detection(image: np.ndarray,
                 # 현재 점이 local maximum인지 확인
                 if R[i, j] >= max_val - 1e-6:  # 부동소수점 오차 고려
                     corners_list.append([j, i])  # [x, y] 형식
+                    corner_responses.append(R[i, j])
     
     if len(corners_list) == 0:
         return np.array([], dtype=np.float32).reshape(0, 2)
+    
+    # 7. 최대 코너 개수 제한 (성능 개선)
+    # Harris Response 값이 높은 순으로 정렬하여 상위 N개만 선택
+    MAX_CORNERS = 1000  # 최대 코너 개수 제한
+    
+    if len(corners_list) > MAX_CORNERS:
+        # Response 값으로 정렬 (내림차순)
+        corner_responses = np.array(corner_responses, dtype=np.float32)
+        sorted_indices = np.argsort(corner_responses)[::-1]  # 내림차순
+        selected_indices = sorted_indices[:MAX_CORNERS]
+        
+        # 상위 N개만 선택
+        corners_list = [corners_list[i] for i in selected_indices]
     
     corners = np.array(corners_list, dtype=np.float32)
     
