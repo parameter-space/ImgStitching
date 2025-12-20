@@ -113,10 +113,10 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     gray1_norm = normalize_image(gray1)
     gray2_norm = normalize_image(gray2)
     
-    # 3. 코너 포인트 찾기
+    # 3. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 2~3배 증가)
     corners1 = harris_corner_detection(
         gray1_norm,
-        threshold=0.01,
+        threshold=0.001,  # 0.01 -> 0.001로 낮춤
         k=0.04,
         window_size=3,
         sigma=1.0
@@ -124,7 +124,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     corners2 = harris_corner_detection(
         gray2_norm,
-        threshold=0.01,
+        threshold=0.001,  # 0.01 -> 0.001로 낮춤
         k=0.04,
         window_size=3,
         sigma=1.0
@@ -156,13 +156,13 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     # 6.5. 공간 분산 필터링: 매칭이 이미지 전체에 고르게 분포하도록 필터링
     # 이미지를 3x3 그리드로 나누어 각 영역에서 균등하게 선택
     # 단, 충분한 매칭이 있을 때만 적용하고, 필터링 후에도 충분한 매칭이 남아있어야 함
-    if len(matches) > 20:  # 충분한 매칭이 있을 때만 적용 (기준 완화: 12 → 20)
-        matches_filtered = filter_by_spatial_distribution(image1, image2, corners1, corners2, matches, grid_size=3)
-        # 필터링 후에도 최소 8개 이상의 매칭이 남아있어야 함 (RANSAC을 위해)
-        if len(matches_filtered) >= max(8, len(matches) * 0.3):  # 원래 매칭의 30% 이상
-            matches = matches_filtered
-            points1, points2 = get_matched_points(corners1, corners2, matches)
-            print(f"  After spatial filtering: {len(matches)} matches")
+    # if len(matches) > 20:  # 충분한 매칭이 있을 때만 적용 (기준 완화: 12 → 20)
+    #     matches_filtered = filter_by_spatial_distribution(image1, image2, corners1, corners2, matches, grid_size=3)
+    #     # 필터링 후에도 최소 8개 이상의 매칭이 남아있어야 함 (RANSAC을 위해)
+    #     if len(matches_filtered) >= max(8, len(matches) * 0.3):  # 원래 매칭의 30% 이상
+    #         matches = matches_filtered
+    #         points1, points2 = get_matched_points(corners1, corners2, matches)
+    #         print(f"  After spatial filtering: {len(matches)} matches")
     
     # 7. RANSAC을 사용하여 Outlier 제거 및 Homography 계산
     # image1 -> image2 변환 Homography 계산
@@ -172,7 +172,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     H_1to2, inlier_mask = ransac_homography(
         points1, points2,
         max_iterations=2000,
-        threshold=3.0,  # 픽셀 단위 임계값
+        threshold=5.0,  # 3.0 -> 5.0으로 완화하여 Inlier 개수 증가
         min_inliers=min_inliers
     )
     
@@ -184,61 +184,96 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     if inlier_count < 4:
         print(f"  Warning: Low inlier count ({inlier_count} < 4). Result may be unreliable.")
     
-    # 7.5. Projective-Affine Interpolation (적응형 전략)
+    # 7.5. 3단계 적응형 하이브리드 전략 (Adaptive Hybrid Strategy)
     # Projective 변환의 과도한 왜곡(Scale Explosion)을 막기 위해
-    # 데이터가 불안정할 때 Affine 모델과 Projective 모델을 섞어서 안정성을 확보
+    # Scale과 Perspective에 따라 Projective와 Affine을 적절히 섞어서 사용
     
-    # Step 1: Projective H의 Scale 검사
-    # Scale은 determinant의 제곱근으로 계산 (Affine 성분의 평균 scale)
-    scale_x = np.sqrt(H_1to2[0, 0]**2 + H_1to2[0, 1]**2)
-    scale_y = np.sqrt(H_1to2[1, 0]**2 + H_1to2[1, 1]**2)
-    scale_avg = (scale_x + scale_y) / 2.0
+    # Step 1: 지표 계산
+    # Scale 계산 (Determinant 기반)
+    det = H_1to2[0, 0] * H_1to2[1, 1] - H_1to2[0, 1] * H_1to2[1, 0]
+    if det <= 1e-10:
+        current_scale = 0.0
+    else:
+        current_scale = np.sqrt(det)
     
-    # Step 2: 적응형 전략 적용
-    use_interpolation = False
-    alpha = 0.3  # 기본값: Projective만 사용
+    # Perspective 성분 검사 (이 값이 크면 이미지가 부채꼴로 퍼짐)
+    if abs(H_1to2[2, 2]) > 1e-10:
+        H_norm = H_1to2 / H_1to2[2, 2]
+    else:
+        H_norm = H_1to2
+    persp_val = abs(H_norm[2, 0]) + abs(H_norm[2, 1])
     
-    # Scale이 정상 범위(0.7 ~ 1.3)이고 Inlier가 충분하면 Projective 그대로 사용
-    if scale_avg < 0.7 or scale_avg > 1.3:
-        print(f"  Warning: Abnormal scale detected (avg: {scale_avg:.3f}, x: {scale_x:.3f}, y: {scale_y:.3f}).")
-        print(f"    Scale out of range [0.7, 1.3]. Applying Projective-Affine Interpolation...")
-        use_interpolation = True
-        # 왜곡이 심할수록 Affine에 가깝게 (alpha를 높게 설정)
-        if scale_avg < 0.5 or scale_avg > 2.0:
-            alpha = 1.0  # 극단적인 경우 완전히 Affine
-        elif scale_avg < 0.7 or scale_avg > 1.3:
-            alpha = 0.9  # 비정상적인 경우 거의 Affine
-    elif inlier_count < 10:
-        print(f"  Warning: Low inlier count ({inlier_count} < 10). Applying Projective-Affine Interpolation...")
-        use_interpolation = True
-        # Inlier가 부족할 때는 중간 정도 Affine에 가깝게
-        alpha = 0.7
+    # Step 2: 거리 기반 점진적 혼합 전략 (Distance-based Gradual Hybrid) - 강화 버전
+    # Scale 폭발 원천 봉쇄: 2배만 커져도 Affine 100% 강제
+    # Scale과 Perspective에 따른 연속적인 alpha 계산 (if-else 대신 선형 보간)
+    
+    # 1. Scale에 따른 Alpha 계산 (선형 보간) - 강화
+    # Scale 1.1 이하면 Homography (0.0), Scale 2.0 이상이면 Affine (1.0) - 핵심 변경
+    # 그 사이는 급격하게 증가 (1.1 ~ 2.0 사이)
+    if current_scale <= 1.1:
+        scale_alpha = 0.0
+    elif current_scale >= 2.0:
+        scale_alpha = 1.0  # 2배만 커져도 Affine 100% 강제
+    else:
+        # 1.1 ~ 2.0 사이: 선형 보간 (급격하게 증가)
+        scale_alpha = (current_scale - 1.1) / (2.0 - 1.1)
+    
+    # Scale이 0.5 미만인 경우도 처리 (역방향)
+    if current_scale < 0.5:
+        # 0.5 -> 0.0, 0.0 -> 1.0
+        if current_scale <= 0.0:
+            scale_alpha = 1.0
+        else:
+            scale_alpha = (0.5 - current_scale) / 0.5
+    
+    # 2. Perspective(원근) 성분에 따른 Alpha 계산 - 강화
+    # persp_val이 0.0005 이하면 0.0, 0.001 이상이면 1.0 (기존 0.002에서 강화)
+    if persp_val <= 0.0005:
+        persp_alpha = 0.0
+    elif persp_val >= 0.001:
+        persp_alpha = 1.0  # 0.001 이상이면 Affine 100% 강제
+    else:
+        # 0.0005 ~ 0.001 사이: 선형 보간
+        persp_alpha = (persp_val - 0.0005) / (0.001 - 0.0005)
+    
+    # 3. 최종 Alpha: 둘 중 더 위험한 신호를 따름
+    alpha = max(scale_alpha, persp_alpha)
+    
+    # 안전장치: Inlier가 너무 적으면 무조건 Affine 비중 높임
+    if inlier_count < 15:
+        alpha = max(alpha, 0.8)
+    
+    # Stage 및 Reason 결정 (디버깅용)
+    if alpha >= 1.0:
+        stage = "Critical"
+        reason = f"Full Affine (scale={current_scale:.3f}, persp={persp_val:.5f})"
+    elif alpha >= 0.5:
+        stage = "Warning"
+        reason = f"High Affine Mix (alpha={alpha:.2f}, scale={current_scale:.3f})"
+    elif alpha > 0.0:
+        stage = "Warning"
+        reason = f"Moderate Affine Mix (alpha={alpha:.2f}, scale={current_scale:.3f})"
+    else:
+        stage = "Safe"
+        reason = f"Pure Homography (scale={current_scale:.3f})"
     
     # Step 3: Interpolation 적용
-    if use_interpolation:
-        # 같은 Inlier 점들로 Affine Homography 계산
+    if alpha > 0.0:
+        print(f"  Adaptive Strategy [{stage}]: {reason}. Alpha = {alpha:.2f}")
+        
+        # Inlier 점들로 Affine Homography 계산
         points1_inliers = points1[inlier_mask]
         points2_inliers = points2[inlier_mask]
         
         if len(points1_inliers) >= 3:
             try:
-                H_1to2_affine = compute_homography_affine(points1_inliers, points2_inliers)
+                # Affine 계산
+                H_affine = compute_homography_affine(points1_inliers, points2_inliers)
                 
-                # Affine H의 Scale 검증
-                scale_x_affine = np.sqrt(H_1to2_affine[0, 0]**2 + H_1to2_affine[0, 1]**2)
-                scale_y_affine = np.sqrt(H_1to2_affine[1, 0]**2 + H_1to2_affine[1, 1]**2)
-                scale_avg_affine = (scale_x_affine + scale_y_affine) / 2.0
+                # Projective와 Affine을 alpha 비율로 보간
+                H_1to2 = interpolate_homography(H_1to2, H_affine, alpha)
+                print(f"    -> Applied Hybrid Matrix (Projective + Affine, alpha={alpha:.2f})")
                 
-                print(f"    Affine H scale: {scale_avg_affine:.3f}, Interpolation alpha: {alpha:.2f}")
-                
-                # Interpolation 적용
-                H_1to2 = interpolate_homography(H_1to2, H_1to2_affine, alpha)
-                
-                # Interpolation 후 Scale 재검증
-                scale_x_interp = np.sqrt(H_1to2[0, 0]**2 + H_1to2[0, 1]**2)
-                scale_y_interp = np.sqrt(H_1to2[1, 0]**2 + H_1to2[1, 1]**2)
-                scale_avg_interp = (scale_x_interp + scale_y_interp) / 2.0
-                print(f"    Interpolated H scale: {scale_avg_interp:.3f}")
             except Exception as e:
                 print(f"    Affine computation failed: {e}. Using original Projective H.")
         else:
@@ -357,7 +392,7 @@ def main():
     """
     # 1. 이미지 로드
     # 사용자가 사용할 sampleset 폴더 이름을 여기에 지정하세요
-    sampleset_folder_name = "sampleset3"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
+    sampleset_folder_name = "sampleset1"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)

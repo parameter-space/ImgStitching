@@ -283,8 +283,8 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             bbox_width = max_x - min_x
             bbox_height = max_y - min_y
             # Corner distance 검증이 이미 있으므로, bounding box 검증은 매우 관대하게 설정
-            # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 50배 이상)
-            if bbox_width > W_img * 50 or bbox_height > H_img * 50:
+            # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 200배 이상)
+            if bbox_width > W_img * 200 or bbox_height > H_img * 200:
                 print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 극도로 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}). Canvas 계산에서 제외합니다.")
                 continue
             
@@ -412,9 +412,20 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
         # 메모리 보호를 위해 최대 크기로 제한
         width = min(width, MAX_REASONABLE_SIZE)
         height = min(height, MAX_REASONABLE_SIZE)
-        # bounds도 조정
-        bounds_max_x = min(bounds_max_x, float(width - width_adjustment - 1))
-        bounds_max_y = min(bounds_max_y, float(height - height_adjustment - 1))
+        
+        # [수정] 캔버스 크기 제한 시 중앙 이미지 위치 재조정
+        # 캔버스가 잘렸다면, 중앙 이미지가 그 잘린 캔버스의 정중앙에 오도록 강제로 재계산
+        width_adjustment = (width - W_center) // 2
+        height_adjustment = (height - H_center) // 2
+        
+        # bounds도 캔버스 크기에 맞게 가상의 값으로 클램핑
+        bounds_min_x = -width_adjustment
+        bounds_max_x = width - width_adjustment
+        bounds_min_y = -height_adjustment
+        bounds_max_y = height - height_adjustment
+        
+        print(f"  재조정된 adjustment: x={width_adjustment}, y={height_adjustment}")
+        print(f"  재조정된 bounds: x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
     
     return (height, width), (y_offset, x_offset), (height_adjustment, width_adjustment), (bounds_min_x, bounds_max_x, bounds_min_y, bounds_max_y)
 
@@ -443,21 +454,44 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     center_idx = len(homographies) // 2
     
     # Canvas 크기 계산 (중앙 이미지 좌표계 기준)
+    # bounds만 신뢰하고, width/height는 무시 (Auto-Scaling 적용)
     canvas_size, offset, adjustments, bounds = compute_canvas_size(images, homographies, None)
-    H_canvas, W_canvas = canvas_size
     y_offset, x_offset = offset
-    height_adjustment, width_adjustment = adjustments
     bounds_min_x, bounds_max_x, bounds_min_y, bounds_max_y = bounds
     
-    print(f"Canvas 크기: {W_canvas}x{H_canvas} 픽셀")
+    # Auto-Scaling: 거대한 파노라마도 잘리지 않고 처리
+    MAX_CANVAS = 25000  # 최대 캔버스 크기
+    padding = max(20, min(100, int(max(bounds_max_x - bounds_min_x, bounds_max_y - bounds_min_y) / 100)))
+    
+    # 전체 파노라마의 실제 크기 계산
+    real_w = bounds_max_x - bounds_min_x
+    real_h = bounds_max_y - bounds_min_y
+    
+    # Scale Factor 계산 (비율 유지하면서 축소)
+    if real_w > (MAX_CANVAS - padding * 2) or real_h > (MAX_CANVAS - padding * 2):
+        global_scale = min(
+            1.0,
+            (MAX_CANVAS - padding * 2) / real_w,
+            (MAX_CANVAS - padding * 2) / real_h
+        )
+        print(f"  Auto-Scaling 적용: 실제 크기 {real_w:.0f}x{real_h:.0f} → {real_w*global_scale:.0f}x{real_h*global_scale:.0f} (scale={global_scale:.3f})")
+    else:
+        global_scale = 1.0
+    
+    # Canvas 크기 재설정 (global_scale 적용)
+    W_canvas = int(real_w * global_scale) + 2 * padding
+    H_canvas = int(real_h * global_scale) + 2 * padding
+    
+    # Adjustment 재설정: 전체 파노라마의 Top-Left가 캔버스의 (padding, padding) 위치에 오도록
+    # 슬라이스 인덱스는 정수여야 하므로 int로 변환
+    width_adjustment = int(padding - (bounds_min_x * global_scale))
+    height_adjustment = int(padding - (bounds_min_y * global_scale))
+    
+    print(f"Canvas 크기: {W_canvas}x{H_canvas} 픽셀 (Auto-Scaling: {global_scale:.3f})")
     print(f"  실제 이미지 범위 (중앙 이미지 좌표계): x=[{bounds_min_x:.1f}, {bounds_max_x:.1f}], y=[{bounds_min_y:.1f}, {bounds_max_y:.1f}]")
-    print(f"  실제 필요한 크기: {int(bounds_max_x - bounds_min_x) + 1}x{int(bounds_max_y - bounds_min_y) + 1}")
-    print(f"  중앙 이미지 Canvas 위치: ({width_adjustment}, {height_adjustment})")
-    # padding 값을 다시 읽어서 출력 (적응적 padding 적용됨)
-    actual_range_width = bounds_max_x - bounds_min_x
-    actual_range_height = bounds_max_y - bounds_min_y
-    adaptive_padding = max(20, min(100, int(max(actual_range_width, actual_range_height) / 100)))
-    print(f"  Padding: {adaptive_padding}픽셀 (각 방향, 적응적)")
+    print(f"  실제 필요한 크기: {int(real_w) + 1}x{int(real_h) + 1}")
+    print(f"  중앙 이미지 Canvas 위치: ({width_adjustment:.1f}, {height_adjustment:.1f})")
+    print(f"  Padding: {padding}픽셀 (각 방향, 적응적)")
     print(f"Offset: ({x_offset}, {y_offset})")
     print(f"중앙 이미지 인덱스: {center_idx + 1} (0-based: {center_idx})")
     print()
@@ -465,9 +499,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     # Canvas 초기화 (메모리 할당 실패 감지)
     try:
         panorama = np.zeros((H_canvas, W_canvas, 3), dtype=np.float32)
-        count = np.zeros((H_canvas, W_canvas), dtype=np.float32)
-        # Weighted blending을 위한 가중치 합 배열
-        weight_sum = np.zeros((H_canvas, W_canvas), dtype=np.float32)
+        # Winner Takes All (Max Weight) 방식: 현재 픽셀을 점유한 최대 가중치 기록
+        max_weights = np.zeros((H_canvas, W_canvas), dtype=np.float32)
     except MemoryError:
         print(f"  ERROR: 메모리 부족 - Canvas 크기가 너무 큼 ({W_canvas}x{H_canvas})")
         print(f"    필요한 메모리: 약 {W_canvas * H_canvas * 3 * 4 / (1024**3):.2f} GB")
@@ -479,22 +512,23 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     H_center, W_center = images[center_idx].shape[:2]
     
     # Canvas 좌표계에서 중앙 이미지 위치 (adjustment 위치에 배치)
-    canvas_y_start = height_adjustment
-    canvas_y_end = canvas_y_start + H_center
-    canvas_x_start = width_adjustment
-    canvas_x_end = canvas_x_start + W_center
+    # 슬라이스 인덱스는 정수여야 하므로 int로 변환
+    canvas_y_start = int(height_adjustment)
+    canvas_y_end = int(canvas_y_start + H_center)
+    canvas_x_start = int(width_adjustment)
+    canvas_x_end = int(canvas_x_start + W_center)
     
     # Canvas 범위 내에서만 복사
-    copy_y_start = max(0, canvas_y_start)
-    copy_y_end = min(H_canvas, canvas_y_end)
-    copy_x_start = max(0, canvas_x_start)
-    copy_x_end = min(W_canvas, canvas_x_end)
+    copy_y_start = int(max(0, canvas_y_start))
+    copy_y_end = int(min(H_canvas, canvas_y_end))
+    copy_x_start = int(max(0, canvas_x_start))
+    copy_x_end = int(min(W_canvas, canvas_x_end))
     
     # 원본 이미지에서 복사할 영역 계산
-    src_y_start = copy_y_start - canvas_y_start
-    src_y_end = src_y_start + (copy_y_end - copy_y_start)
-    src_x_start = copy_x_start - canvas_x_start
-    src_x_end = src_x_start + (copy_x_end - copy_x_start)
+    src_y_start = int(copy_y_start - canvas_y_start)
+    src_y_end = int(src_y_start + (copy_y_end - copy_y_start))
+    src_x_start = int(copy_x_start - canvas_x_start)
+    src_x_end = int(src_x_start + (copy_x_end - copy_x_start))
     
     # 유효한 범위인지 확인 후 복사
     # 중앙 이미지는 항상 Canvas 내에 있어야 하므로 추가 검증
@@ -503,12 +537,10 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
        src_y_start >= 0 and src_x_start >= 0 and \
        canvas_y_start >= 0 and canvas_x_start >= 0:
         # 중앙 이미지 복사 (가중치 1.0으로 처리)
+        # Winner Takes All 방식: 중앙 이미지는 항상 최대 가중치(1.0)를 가지므로 바로 복사
         panorama[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = \
             images[center_idx][src_y_start:src_y_end, src_x_start:src_x_end].astype(np.float32)
-        count[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
-        # Weighted blending을 위한 가중치 합 (이미지 중심에서의 거리 기반)
-        # 간단하게 중앙 이미지는 가중치 1.0
-        weight_sum[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
+        max_weights[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
         print(f"  중앙 이미지 (Image {center_idx+1}) 배치 완료: Canvas 좌표 y=[{copy_y_start}, {copy_y_end}), x=[{copy_x_start}, {copy_x_end})")
     else:
         print(f"  ERROR: 중앙 이미지 배치 실패")
@@ -539,17 +571,20 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             print(f"    이 이미지를 건너뜁니다.")
             continue
         
-        # 비정상적인 Homography 검증 (극단적인 경우만 제외)
+        # 비정상적인 Homography 검증 (대폭 완화: main.py에서 이미 Hybrid 전략으로 폭발 억제)
         scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
         scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
         
-        # 매우 비정상적인 경우만 제외 (범위 완화: 파노라마는 확대/축소될 수 있음)
-        # 200배 이상 확대/축소는 비정상적 (더 완화: 100 → 200)
-        # scale이 0.0005 미만이면 너무 작음 (더 완화: 0.001 → 0.0005)
-        if scale_x > 200.0 or scale_y > 200.0 or scale_x < 0.0005 or scale_y < 0.0005:
+        # 비정상적인 경우 차단 (대폭 완화: 30.0 → 50.0, 0.01 → 0.001)
+        # main.py에서 이미 Hybrid 전략으로 폭발을 억제했으므로, 여기서는 웬만하면 이미지를 캔버스에 그림
+        if scale_x > 50.0 or scale_y > 50.0 or scale_x < 0.001 or scale_y < 0.001:
             print(f"  Warning: Image {i+1}의 전역 Homography가 극도로 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
-            print(f"    이 이미지를 건너뜁니다.")
+            print(f"    메모리 폭발 방지를 위해 이 이미지를 건너뜁니다.")
             continue
+        elif scale_x > 30.0 or scale_y > 30.0 or scale_x < 0.01 or scale_y < 0.01:
+            # 경고만 출력하고 계속 진행
+            print(f"  Warning: Image {i+1}의 전역 Homography가 비정상적 (scale: x={scale_x:.2f}, y={scale_y:.2f}).")
+            print(f"    계속 진행합니다.")
         
         H_img, W_img = images[i].shape[:2]
         
@@ -605,13 +640,17 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         # 파노라마는 이미지들이 옆으로 확장될 수 있으므로 매우 관대한 기준 사용
         # Corner distance 검증이 이미 있으므로, bounding box 검증은 매우 관대하게 설정
-        # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 50배 이상)
-        # 일반적으로는 corner distance 검증으로 충분함
-        if bbox_width > W_img * 50 or bbox_height > H_img * 50:
+        # 단순히 비정상적으로 큰 경우만 제외 (예: 이미지 크기의 200배 이상)
+        # main.py에서 이미 Hybrid 전략으로 폭발을 억제했으므로, 여기서는 웬만하면 허용
+        if bbox_width > W_img * 200 or bbox_height > H_img * 200:
             print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 극도로 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
             print(f"    이는 Homography 계산 오류를 의미할 수 있습니다.")
             print(f"    이 이미지를 건너뜁니다.")
             continue
+        elif bbox_width > W_img * 100 or bbox_height > H_img * 100:
+            # 경고만 출력하고 계속 진행
+            print(f"  Warning: Image {i+1}의 변환된 corner bounding box가 큼 (w: {bbox_width:.1f}, h: {bbox_height:.1f}).")
+            print(f"    계속 진행합니다.")
         
         # 모든 검증 통과
         print(f"  Image {i+1} 변환 위치 (중앙 이미지 좌표계):")
@@ -640,17 +679,18 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         # 최적화: 이미지가 실제로 차지하는 영역만 처리
         # transformed_corners는 중앙 이미지 좌표계 기준
-        # Canvas 좌표계로 변환하려면 adjustment를 더해야 함
+        # Canvas 좌표계로 변환하려면 global_scale을 적용하고 adjustment를 더해야 함
         min_x_center_coord = min_x
         max_x_center_coord = max_x
         min_y_center_coord = min_y
         max_y_center_coord = max_y
         
         # Canvas 좌표계로 변환 (중앙 이미지 좌표계 → Canvas 좌표계)
-        min_x_canvas = min_x_center_coord + width_adjustment
-        max_x_canvas = max_x_center_coord + width_adjustment
-        min_y_canvas = min_y_center_coord + height_adjustment
-        max_y_canvas = max_y_center_coord + height_adjustment
+        # global_scale을 적용하여 스케일된 좌표로 변환한 후 adjustment 추가
+        min_x_canvas = (min_x_center_coord * global_scale) + width_adjustment
+        max_x_canvas = (max_x_center_coord * global_scale) + width_adjustment
+        min_y_canvas = (min_y_center_coord * global_scale) + height_adjustment
+        max_y_canvas = (max_y_center_coord * global_scale) + height_adjustment
         
         # Canvas 범위 내로 클램핑
         y_start = max(0, int(np.floor(min_y_canvas)) - 5)  # 여유 5픽셀
@@ -676,9 +716,10 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             indexing='ij'
         )
         
-        # 2. Canvas 좌표 → 중앙 이미지 좌표계 변환 (벡터화)
-        x_canvas = x_coords - width_adjustment
-        y_canvas = y_coords - height_adjustment
+        # 2. Canvas 좌표 → 중앙 이미지 좌표계 변환 (벡터화, Auto-Scaling 적용)
+        # global_scale을 역으로 적용하여 원본 좌표계로 정확히 매핑
+        x_canvas = (x_coords - width_adjustment) / global_scale
+        y_canvas = (y_coords - height_adjustment) / global_scale
         
         # 3. 동차 좌표 생성 (벡터화)
         # Flatten하여 (N, 3) 형태로 변환
@@ -812,24 +853,38 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             y_img_filtered = y_img_filtered[valid_canvas_mask]
             
             # 거리 계산 (정규화: 최대 거리 = 대각선 길이)
+            # 중심점(center_x, center_y)으로부터의 유클리드 거리(Euclidean distance) 계산
             max_dist = np.sqrt(center_x**2 + center_y**2)
             distances = np.sqrt((x_img_filtered - center_x)**2 + (y_img_filtered - center_y)**2)
             
-            # 가중치: 중심에 가까울수록 높은 가중치 (선형 감쇠)
-            # 거리가 멀수록 가중치 감소, 이미지 경계 근처에서 더 빠르게 감소
-            # Ghost 현상 감소를 위해 경계 가중치를 더 강하게 감소
+            # Center-Weighted Blending (강한 Feathering)
+            # Ghost 현상 제거를 위해 이미지 중심부에 압도적으로 높은 가중치 부여
+            # 거리가 멀수록 가중치가 급격히 감소하여, 겹치는 구간에서 정렬 오차가 있는 픽셀을 숨기고
+            # 중심부의 선명한 픽셀만 남김
             normalized_distances = distances / (max_dist + 1e-6)
-            # 거리 기반 가중치: 중심에서 멀어질수록 더 빠르게 감소 (제곱 함수 사용)
-            weights = np.maximum((1.0 - normalized_distances) ** 2, 0.05)  # 최소값 0.05, 제곱으로 더 빠른 감소
+            # 지수를 5.0으로 높여서 경계 부근의 가중치가 급격히 0으로 떨어지도록 함
+            # 수식: weights = (1.0 - normalized_distances)^5.0
+            current_weights = np.maximum(np.power(1.0 - normalized_distances, 5.0), 1e-5)  # 최소값 1e-5로 나눗셈 에러 방지
             
-            # 값 할당 (가중치 적용)
-            # Weighted sum: panorama += value * weight
-            if len(images[i].shape) == 3:
-                panorama[valid_y_coords, valid_x_coords] += value * weights[:, np.newaxis]
-            else:
-                panorama[valid_y_coords, valid_x_coords] += value * weights
-            count[valid_y_coords, valid_x_coords] += 1.0
-            weight_sum[valid_y_coords, valid_x_coords] += weights
+            # Winner Takes All (Max Weight) 방식: 더 중심에 가까운(가중치가 높은) 픽셀이 캔버스를 독점
+            # 현재 이미지의 가중치와 기존 최대 가중치 비교
+            mask = current_weights > max_weights[valid_y_coords, valid_x_coords]
+            
+            # 더 중심에 가까운 픽셀인 경우 완전히 덮어쓰기 (Overwrite)
+            if np.any(mask):
+                # mask에 해당하는 위치만 업데이트
+                mask_y_coords = valid_y_coords[mask]
+                mask_x_coords = valid_x_coords[mask]
+                
+                if len(images[i].shape) == 3:
+                    # RGB 이미지: (N, 3) 형태
+                    panorama[mask_y_coords, mask_x_coords] = value[mask]
+                else:
+                    # 그레이스케일 이미지: (N,) 형태
+                    panorama[mask_y_coords, mask_x_coords] = value[mask]
+                
+                # max_weights도 업데이트
+                max_weights[mask_y_coords, mask_x_coords] = current_weights[mask]
             
             # 실제 할당된 픽셀 수 디버깅
             assigned_pixels = len(valid_y_coords)
@@ -839,11 +894,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         print(f"      완료: Image {i+1} 처리 완료 (벡터화)" + " " * 30)  # 공백으로 이전 출력 지움
     
-    # Weighted blending: 가중치 합으로 나누기
-    mask = weight_sum > 1e-6  # 가중치 합이 0보다 큰 픽셀만
-    panorama[mask] = panorama[mask] / weight_sum[mask, np.newaxis]
-    
-    # 가중치 합이 0인 픽셀은 검은색으로 유지 (이미 0으로 초기화됨)
+    # Winner Takes All 방식: 이미 덮어쓰기로 완성되었으므로 나눗셈 후처리 불필요
+    # 가중치가 0인 픽셀은 검은색으로 유지 (이미 0으로 초기화됨)
     
     return panorama.astype(np.uint8)
 
