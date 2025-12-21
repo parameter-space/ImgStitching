@@ -17,6 +17,7 @@ from point_matching import compute_descriptors, match_features, get_matched_poin
 from homography import compute_homography_dlt, compute_homography_affine, interpolate_homography, apply_homography
 from ransac import ransac_homography
 from stitching import stitch_multiple_images
+from preprocessing import preprocess_image
 
 
 def filter_by_spatial_distribution(image1: np.ndarray,
@@ -105,15 +106,28 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
         H: Homography 행렬 (3, 3) - float32
            image2를 image1 좌표계로 변환하는 Homography
     """
-    # 1. 그레이스케일 변환
-    gray1 = rgb_to_grayscale(image1)
-    gray2 = rgb_to_grayscale(image2)
+    # 1. 전처리: 가우시안 블러를 통한 노이즈 제거
+    preprocessed1 = preprocess_image(image1, kernel_size=5, sigma=1.0)
+    preprocessed2 = preprocess_image(image2, kernel_size=5, sigma=1.0)
     
-    # 2. 정규화 (밝기 차이 극복)
+    # 2. 그레이스케일 변환
+    # preprocess_image가 float32 0~1 범위로 반환하므로 직접 그레이스케일 변환 수행
+    # (rgb_to_grayscale은 uint8을 가정하므로 사용하지 않음)
+    if len(preprocessed1.shape) == 3:
+        gray1 = 0.299 * preprocessed1[:, :, 0] + 0.587 * preprocessed1[:, :, 1] + 0.114 * preprocessed1[:, :, 2]
+    else:
+        gray1 = preprocessed1
+    
+    if len(preprocessed2.shape) == 3:
+        gray2 = 0.299 * preprocessed2[:, :, 0] + 0.587 * preprocessed2[:, :, 1] + 0.114 * preprocessed2[:, :, 2]
+    else:
+        gray2 = preprocessed2
+    
+    # 3. 정규화 (밝기 차이 극복)
     gray1_norm = normalize_image(gray1)
     gray2_norm = normalize_image(gray2)
     
-    # 3. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 2~3배 증가)
+    # 4. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 2~3배 증가)
     corners1 = harris_corner_detection(
         gray1_norm,
         threshold=0.001,  # 0.01 -> 0.001로 낮춤
