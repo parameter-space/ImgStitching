@@ -187,7 +187,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     H_1to2, inlier_mask = ransac_homography(
         points1, points2,
         max_iterations=2000,
-        threshold=5.0,  # 3.0 -> 5.0으로 완화하여 Inlier 개수 증가
+        threshold=4.0,  # 5.0 -> 4.0으로 조정: Ghost 현상 방지를 위해 정렬 정확도 향상 (완화와 정확도의 균형)
         min_inliers=min_inliers
     )
     
@@ -407,7 +407,7 @@ def main():
     """
     # 1. 이미지 로드
     # 사용자가 사용할 sampleset 폴더 이름을 여기에 지정하세요
-    sampleset_folder_name = "sampleset1"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
+    sampleset_folder_name = "sampleset3"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)

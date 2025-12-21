@@ -130,15 +130,25 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
             scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
             
-            # 비정상적인 scale 체크 및 보정
-            # Scale이 0.1 미만이거나 10 이상이면 비정상적 (더 엄격한 기준)
-            if scale_x < 0.1 or scale_x > 10.0 or scale_y < 0.1 or scale_y > 10.0:
+            # 비정상적인 scale 체크 및 보정 (Image 10 포함을 위해 완화)
+            # Scale 검증 완화: 0.1 → 0.05, x와 y 중 하나라도 정상이면 허용
+            # 둘 다 매우 작거나 매우 크면 제외 (메모리 폭발 방지)
+            scale_x_valid = 0.05 <= scale_x <= 10.0
+            scale_y_valid = 0.05 <= scale_y <= 10.0
+            both_invalid = not scale_x_valid and not scale_y_valid
+            both_extreme = (scale_x < 0.01 or scale_x > 50.0) and (scale_y < 0.01 or scale_y > 50.0)
+            
+            if both_invalid or both_extreme:
                 print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
                 print(f"    indices: {accumulated_indices}")
                 print(f"    이 이미지는 스티칭에서 제외됩니다.")
                 # 비정상적인 경우 None으로 표시 (나중에 제외)
                 global_homographies.append(None)
             else:
+                if not scale_x_valid or not scale_y_valid:
+                    print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 부분적으로 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
+                    print(f"    indices: {accumulated_indices}")
+                    print(f"    하나의 축이 정상 범위이므로 계속 진행합니다.")
                 print(f"  Image {img_idx+1}: 왼쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
                 global_homographies.append(H_to_center)
         else:
@@ -182,15 +192,25 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
             scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
             
-            # 비정상적인 scale 체크 및 보정
-            # Scale이 0.1 미만이거나 10 이상이면 비정상적 (더 엄격한 기준)
-            if scale_x < 0.1 or scale_x > 10.0 or scale_y < 0.1 or scale_y > 10.0:
+            # 비정상적인 scale 체크 및 보정 (Image 10 포함을 위해 완화)
+            # Scale 검증 완화: 0.1 → 0.05, x와 y 중 하나라도 정상이면 허용
+            # 둘 다 매우 작거나 매우 크면 제외 (메모리 폭발 방지)
+            scale_x_valid = 0.05 <= scale_x <= 10.0
+            scale_y_valid = 0.05 <= scale_y <= 10.0
+            both_invalid = not scale_x_valid and not scale_y_valid
+            both_extreme = (scale_x < 0.01 or scale_x > 50.0) and (scale_y < 0.01 or scale_y > 50.0)
+            
+            if both_invalid or both_extreme:
                 print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
                 print(f"    indices: {accumulated_indices}")
                 print(f"    이 이미지는 스티칭에서 제외됩니다.")
                 # 비정상적인 경우 None으로 표시 (나중에 제외)
                 global_homographies.append(None)
             else:
+                if not scale_x_valid or not scale_y_valid:
+                    print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 부분적으로 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
+                    print(f"    indices: {accumulated_indices}")
+                    print(f"    하나의 축이 정상 범위이므로 계속 진행합니다.")
                 print(f"  Image {img_idx+1}: 오른쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
                 global_homographies.append(H_to_center)
     
@@ -893,13 +913,26 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             max_dist = np.sqrt(center_x**2 + center_y**2)
             distances = np.sqrt((x_img_filtered - center_x)**2 + (y_img_filtered - center_y)**2)
             
-            # Center-Weighted Blending (부드러운 Feathering)
+            # Center-Weighted Blending (부드러운 Feathering + Ghost 현상 방지)
             # 색보정을 위해 경계에서 부드러운 블렌딩 적용
+            # Ghost 현상 방지를 위해 중심부 가중치를 더 강하게 적용
             # 거리가 멀수록 가중치가 점진적으로 감소하여, 겹치는 구간에서 자연스러운 블렌딩
             normalized_distances = distances / (max_dist + 1e-6)
-            # 지수를 2.0으로 낮춰서 경계에서 부드러운 블렌딩 (5.0 → 2.0)
-            # 수식: weights = (1.0 - normalized_distances)^2.0
-            current_weights = np.maximum(np.power(1.0 - normalized_distances, 2.0), 1e-5)  # 최소값 1e-5로 나눗셈 에러 방지
+            
+            # 경계 영역 적응형 가중치 지수: 경계부 Ghost 현상 방지
+            # 경계 영역(normalized_distances > 0.6)에서만 가중치 지수를 더 높게 적용
+            # 중심부는 기존 지수(2.5) 유지, 경계부는 지수(3.5)로 강화
+            is_boundary = normalized_distances > 0.6
+            boundary_exp = 3.5  # 경계 영역 가중치 지수 (Ghost 현상 방지)
+            center_exp = 2.5     # 중심부 가중치 지수 (부드러운 경계 유지)
+            
+            # 경계 영역과 중심부에 따라 다른 지수 적용
+            boundary_weights = np.power(1.0 - normalized_distances, boundary_exp)
+            center_weights = np.power(1.0 - normalized_distances, center_exp)
+            current_weights = np.maximum(
+                np.where(is_boundary, boundary_weights, center_weights),
+                1e-5  # 최소값 1e-5로 나눗셈 에러 방지
+            )
             
             # 가중치 기반 블렌딩 (Weighted Blending): 경계에서 자연스러운 색 전환
             # 기존 픽셀과 새 픽셀을 가중 평균으로 블렌딩

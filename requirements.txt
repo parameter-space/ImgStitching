@@ -1,0 +1,10 @@
+# Panorama Image Stitching Project - Required Libraries
+# Python 3.6+ required
+
+# Core Libraries
+numpy>=1.16.0,<2.0.0          # NumPy 1.16+ for Python 3.6+, <2.0 for compatibility
+opencv-python>=4.0.0,<5.0.0   # OpenCV 4.0+ for modern API, <5.0 for stability
+
+# Optional (for better performance, not required)
+# scipy>=1.2.0  # If you want to use scipy for advanced operations (not currently used)
+

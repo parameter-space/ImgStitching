@@ -18,6 +18,7 @@ from homography import compute_homography_dlt, compute_homography_affine, interp
 from ransac import ransac_homography
 from stitching import stitch_multiple_images
 from preprocessing import preprocess_image
+from tone_mapping import tone_map_images
 
 
 def filter_by_spatial_distribution(image1: np.ndarray,
@@ -186,7 +187,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     H_1to2, inlier_mask = ransac_homography(
         points1, points2,
         max_iterations=2000,
-        threshold=5.0,  # 3.0 -> 5.0으로 완화하여 Inlier 개수 증가
+        threshold=4.0,  # 5.0 -> 4.0으로 조정: Ghost 현상 방지를 위해 정렬 정확도 향상 (완화와 정확도의 균형)
         min_inliers=min_inliers
     )
     
@@ -427,12 +428,32 @@ def main():
     print(f"로드된 이미지 개수: {len(images)}")
     print()
     
-    # 2. 모든 인접 이미지 쌍에 대해 Homography 계산
-    homographies = compute_all_homographies(images)
+    # 2. Tone Mapping 적용 (노출 차이 및 색감 차이 조정)
+    print("Tone Mapping 적용 중...")
+    # 방법 선택:
+    # - "zscore": Z-score 정규화 (요구사항 구현, 밝기 보정만)
+    # - "zscore_ratio": Z-score + 채널 비율 보정 (색온도 보정 포함)
+    # - "lab": LAB 색공간 기반 보정 (색온도/색조 보정)
+    # - "zscore_lab": Z-score + LAB 보정 결합 (최고 품질, 경계 색보정 개선)
+    # - "histogram": 히스토그램 매칭 (색감 보정, 경계 색보정 개선)
+    tone_mapping_method = "histogram"  # 경계 색보정 개선을 위해 "histogram" 또는 "zscore_lab" 사용
+    images_tone_mapped = tone_map_images(images, method=tone_mapping_method)
     
-    # 3. 이미지 스티칭
+    # float32 0~1 범위를 uint8 0~255로 변환 (기존 파이프라인과 호환)
+    images_for_processing = []
+    for img_float in images_tone_mapped:
+        img_uint8 = (np.clip(img_float, 0.0, 1.0) * 255.0).astype(np.uint8)
+        images_for_processing.append(img_uint8)
+    
+    print(f"Tone Mapping 완료 (방법: {tone_mapping_method})")
+    print()
+    
+    # 3. 모든 인접 이미지 쌍에 대해 Homography 계산
+    homographies = compute_all_homographies(images_for_processing)
+    
+    # 4. 이미지 스티칭
     print("파노라마 이미지 생성 중...")
-    panorama = stitch_multiple_images(images, homographies)
+    panorama = stitch_multiple_images(images_for_processing, homographies)
     
     if panorama is None:
         print("스티칭 실패")
@@ -442,7 +463,7 @@ def main():
         print("스티칭 실패: panorama 크기가 유효하지 않습니다")
         return
     
-    # 4. 결과 저장 및 표시
+    # 5. 결과 저장 및 표시
     output_path = "result.jpg"
     try:
         save_image(panorama, output_path)
