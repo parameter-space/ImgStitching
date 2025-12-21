@@ -124,7 +124,7 @@ def match_features(descriptors1: np.ndarray,
         second_best_ncc = ncc_scores[second_best_idx]
         
         # Ratio test: best_ncc가 충분히 크고, second_best_ncc와의 비율이 threshold보다 작아야 함
-        if best_ncc > 0.4 and second_best_ncc > 0:  # 0.5 -> 0.4로 완화하여 매칭 개수 증가
+        if best_ncc > 0.5 and second_best_ncc > 0:
             ratio = second_best_ncc / best_ncc
             
             if ratio < threshold:

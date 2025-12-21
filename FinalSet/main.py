@@ -127,10 +127,10 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     gray1_norm = normalize_image(gray1)
     gray2_norm = normalize_image(gray2)
     
-    # 4. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 증가)
+    # 4. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 2~3배 증가)
     corners1 = harris_corner_detection(
         gray1_norm,
-        threshold=0.0005,  # 0.001 -> 0.0005로 더 낮춤 (코너 개수 증가)
+        threshold=0.001,  # 0.01 -> 0.001로 낮춤
         k=0.04,
         window_size=3,
         sigma=1.0
@@ -138,7 +138,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     corners2 = harris_corner_detection(
         gray2_norm,
-        threshold=0.0005,  # 0.001 -> 0.0005로 더 낮춤 (코너 개수 증가)
+        threshold=0.001,  # 0.01 -> 0.001로 낮춤
         k=0.04,
         window_size=3,
         sigma=1.0
@@ -157,7 +157,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     # 5. Feature Matching (threshold 완화하여 더 많은 후보 확보)
     # 공간 분산을 위해 약간 완화된 threshold 사용
-    matches = match_features(descriptors1, descriptors2, threshold=0.8)  # 0.75 -> 0.8로 완화
+    matches = match_features(descriptors1, descriptors2, threshold=0.75)
     print(f"  Matched features: {len(matches)}")
     
     if len(matches) < 4:
@@ -180,13 +180,13 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     # 7. RANSAC을 사용하여 Outlier 제거 및 Homography 계산
     # image1 -> image2 변환 Homography 계산
-    # min_inliers를 동적으로 조정: 매칭 개수의 25% 또는 최소 4개 (30% -> 25%로 완화)
-    min_inliers = max(4, int(len(matches) * 0.25))
+    # min_inliers를 동적으로 조정: 매칭 개수의 30% 또는 최소 4개
+    min_inliers = max(4, int(len(matches) * 0.3))
     
     H_1to2, inlier_mask = ransac_homography(
         points1, points2,
         max_iterations=2000,
-        threshold=7.0,  # 5.0 -> 7.0으로 더 완화하여 Inlier 개수 증가
+        threshold=5.0,  # 3.0 -> 5.0으로 완화하여 Inlier 개수 증가
         min_inliers=min_inliers
     )
     
@@ -406,7 +406,7 @@ def main():
     """
     # 1. 이미지 로드
     # 사용자가 사용할 sampleset 폴더 이름을 여기에 지정하세요
-    sampleset_folder_name = "sampleset1"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
+    sampleset_folder_name = "sampleset3"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
@@ -426,13 +426,6 @@ def main():
     
     print(f"로드된 이미지 개수: {len(images)}")
     print()
-    
-    # 1.5. Tone Mapping 적용 (옵션)
-    USE_TONE_MAPPING = True  # False로 설정하면 기존 동작
-    
-    if USE_TONE_MAPPING:
-        from tone_mapping import normalize_image_brightness_rgb
-        images = normalize_image_brightness_rgb(images)
     
     # 2. 모든 인접 이미지 쌍에 대해 Homography 계산
     homographies = compute_all_homographies(images)
