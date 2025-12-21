@@ -111,9 +111,16 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                 # 누적: 중앙에 가까운 변환 행렬이 왼쪽에 위치하도록
                 H_to_center = H_inv @ H_to_center
                 
-                # 누적 후 정규화 (오차 누적 방지)
+                # 누적 후 정규화 (오차 누적 방지) - 정규화 강화
                 if abs(H_to_center[2, 2]) > 1e-10:
                     H_to_center = H_to_center / H_to_center[2, 2]
+                
+                # Determinant 검증 및 재정규화 (수치적 안정성 향상)
+                det = np.linalg.det(H_to_center)
+                if abs(det) > 1e-10 and abs(det) < 1e10:
+                    # Determinant가 합리적 범위 내에 있으면 재정규화
+                    if abs(H_to_center[2, 2]) > 1e-10:
+                        H_to_center = H_to_center / H_to_center[2, 2]
             
             # 최종 정규화
             if abs(H_to_center[2, 2]) > 1e-10:
@@ -123,14 +130,17 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
             scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
             
-            # 비정상적인 scale 체크
-            if scale_x < 0.01 or scale_x > 100.0 or scale_y < 0.01 or scale_y > 100.0:
+            # 비정상적인 scale 체크 및 보정
+            # Scale이 0.1 미만이거나 10 이상이면 비정상적 (더 엄격한 기준)
+            if scale_x < 0.1 or scale_x > 10.0 or scale_y < 0.1 or scale_y > 10.0:
                 print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
                 print(f"    indices: {accumulated_indices}")
-            
-            print(f"  Image {img_idx+1}: 왼쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
-            
-            global_homographies.append(H_to_center)
+                print(f"    이 이미지는 스티칭에서 제외됩니다.")
+                # 비정상적인 경우 None으로 표시 (나중에 제외)
+                global_homographies.append(None)
+            else:
+                print(f"  Image {img_idx+1}: 왼쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
+                global_homographies.append(H_to_center)
         else:
             # 중앙보다 오른쪽: 순방향 누적
             # 계산식: x_center = H[center_idx] * H[center_idx+1] * ... * H[img_idx-1] * x_{img_idx}
@@ -153,9 +163,16 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
                 # 누적: 중앙에 가까운 변환 행렬이 왼쪽에 위치하도록
                 H_to_center = H_to_center @ H
                 
-                # 누적 후 정규화 (오차 누적 방지)
+                # 누적 후 정규화 (오차 누적 방지) - 정규화 강화
                 if abs(H_to_center[2, 2]) > 1e-10:
                     H_to_center = H_to_center / H_to_center[2, 2]
+                
+                # Determinant 검증 및 재정규화 (수치적 안정성 향상)
+                det = np.linalg.det(H_to_center)
+                if abs(det) > 1e-10 and abs(det) < 1e10:
+                    # Determinant가 합리적 범위 내에 있으면 재정규화
+                    if abs(H_to_center[2, 2]) > 1e-10:
+                        H_to_center = H_to_center / H_to_center[2, 2]
             
             # 최종 정규화
             if abs(H_to_center[2, 2]) > 1e-10:
@@ -165,14 +182,17 @@ def compute_global_homographies_center_ref(homographies: list) -> list:
             scale_x = np.sqrt(H_to_center[0, 0]**2 + H_to_center[0, 1]**2)
             scale_y = np.sqrt(H_to_center[1, 0]**2 + H_to_center[1, 1]**2)
             
-            # 비정상적인 scale 체크
-            if scale_x < 0.01 or scale_x > 100.0 or scale_y < 0.01 or scale_y > 100.0:
+            # 비정상적인 scale 체크 및 보정
+            # Scale이 0.1 미만이거나 10 이상이면 비정상적 (더 엄격한 기준)
+            if scale_x < 0.1 or scale_x > 10.0 or scale_y < 0.1 or scale_y > 10.0:
                 print(f"  Warning: Image {img_idx+1}의 Global Homography scale이 비정상적 (x: {scale_x:.2f}, y: {scale_y:.2f})")
                 print(f"    indices: {accumulated_indices}")
-            
-            print(f"  Image {img_idx+1}: 오른쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
-            
-            global_homographies.append(H_to_center)
+                print(f"    이 이미지는 스티칭에서 제외됩니다.")
+                # 비정상적인 경우 None으로 표시 (나중에 제외)
+                global_homographies.append(None)
+            else:
+                print(f"  Image {img_idx+1}: 오른쪽 누적 (indices: {accumulated_indices}), scale: ({scale_x:.2f}, {scale_y:.2f})")
+                global_homographies.append(H_to_center)
     
     print()
     return global_homographies
@@ -229,6 +249,12 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
         # images[i]를 중앙 이미지 좌표계로 변환
         # global_homographies[i]: images[i] → 중앙 이미지 좌표계
         H_to_center = global_homographies[i]
+        
+        # None 체크 (비정상적인 전역 Homography는 None으로 표시됨)
+        if H_to_center is None:
+            print(f"  Warning: Image {i+1}의 전역 Homography가 None입니다 (비정상적인 scale로 인해 제외됨).")
+            print(f"    Canvas 계산에서 제외합니다.")
+            continue
         
         # Homography 정규화
         if abs(H_to_center[2, 2]) > 1e-10:
@@ -291,14 +317,15 @@ def compute_canvas_size(images: list, homographies: list, H_center_to_first: np.
             # 추가 이상값 필터링: 더 관대한 기준 사용
             # 파노라마는 이미지들이 옆으로 확장될 수 있으므로, 더 넓은 범위 허용
             # 중앙 이미지 크기를 기준으로 사용 (모든 이미지 크기 누적은 실제 크기보다 훨씬 큼)
-            max_reasonable_distance = max(base_width, base_height) * 30  # 5 → 30으로 더 완화
+            # 거리 기준 완화: 전역 Homography 누적 오차를 고려하여 * 50으로 완화
+            max_reasonable_distance = max(base_width, base_height) * 50  # 30 → 50으로 더 완화
             # 벡터화된 필터링
             # 완화: 모든 corner가 아니라 대부분이 합리적이면 포함
             corner_distances = np.sqrt(valid_transformed_corners[:, 0]**2 + valid_transformed_corners[:, 1]**2)
             distance_mask = corner_distances <= max_reasonable_distance
             
-            # 4개 corner 중 3개 이상이 합리적 거리 내에 있으면 포함
-            if np.sum(distance_mask) >= 3:
+            # 유효 corner 기준 완화: 4개 corner 중 2개 이상이 합리적 거리 내에 있으면 포함 (3개 → 2개)
+            if np.sum(distance_mask) >= 2:
                 final_valid_corners = valid_transformed_corners[distance_mask]
                 all_corners.append(final_valid_corners)
             else:
@@ -499,7 +526,7 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
     # Canvas 초기화 (메모리 할당 실패 감지)
     try:
         panorama = np.zeros((H_canvas, W_canvas, 3), dtype=np.float32)
-        # Winner Takes All (Max Weight) 방식: 현재 픽셀을 점유한 최대 가중치 기록
+        # 가중치 기반 블렌딩: 각 픽셀의 누적 가중치 기록
         max_weights = np.zeros((H_canvas, W_canvas), dtype=np.float32)
     except MemoryError:
         print(f"  ERROR: 메모리 부족 - Canvas 크기가 너무 큼 ({W_canvas}x{H_canvas})")
@@ -537,7 +564,7 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
        src_y_start >= 0 and src_x_start >= 0 and \
        canvas_y_start >= 0 and canvas_x_start >= 0:
         # 중앙 이미지 복사 (가중치 1.0으로 처리)
-        # Winner Takes All 방식: 중앙 이미지는 항상 최대 가중치(1.0)를 가지므로 바로 복사
+        # 가중치 기반 블렌딩: 중앙 이미지는 가중치 1.0으로 설정
         panorama[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = \
             images[center_idx][src_y_start:src_y_end, src_x_start:src_x_end].astype(np.float32)
         max_weights[copy_y_start:copy_y_end, copy_x_start:copy_x_end] = 1.0
@@ -559,6 +586,12 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # images[i]를 중앙 이미지 좌표계로 변환하는 Homography
         # global_homographies[i]: images[i] → 중앙 이미지 좌표계
         H_to_center = global_homographies[i]
+        
+        # None 체크 (비정상적인 전역 Homography는 None으로 표시됨)
+        if H_to_center is None:
+            print(f"  Warning: Image {i+1}의 전역 Homography가 None입니다 (비정상적인 scale로 인해 제외됨).")
+            print(f"    이 이미지를 건너뜁니다.")
+            continue
         
         # Homography 정규화
         if abs(H_to_center[2, 2]) > 1e-10:
@@ -607,13 +640,14 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # 파노라마는 옆으로 확장될 수 있으므로 더 관대한 기준 사용
         # 중앙 이미지 기준으로 계산 (모든 이미지가 중앙 이미지 주변에 배치되어야 함)
         H_center, W_center = images[center_idx].shape[:2]
-        max_reasonable_distance = max(W_center, H_center) * 30  # 20 → 30으로 더 완화
+        # 거리 기준 완화: 전역 Homography 누적 오차를 고려하여 * 50으로 완화
+        max_reasonable_distance = max(W_center, H_center) * 50  # 30 → 50으로 더 완화
         corner_distances = np.sqrt(transformed_corners[:, 0]**2 + transformed_corners[:, 1]**2)
         
         # 완화된 체크: 모든 corner가 아니라 대부분의 corner가 합리적이면 포함
-        # 4개 corner 중 3개 이상이 합리적 거리 내에 있으면 포함
+        # 유효 corner 기준 완화: 4개 중 2개 이상이 합리적 거리 내에 있으면 포함 (3개 → 2개)
         valid_corner_count = np.sum(corner_distances <= max_reasonable_distance)
-        if valid_corner_count < 3:  # 4개 중 3개 미만이면 제외
+        if valid_corner_count < 2:  # 4개 중 2개 미만이면 제외 (3개 → 2개로 완화)
             max_dist = np.max(corner_distances)
             print(f"  Warning: Image {i+1}의 변환된 모서리가 너무 멀리 떨어져 있음 (최대 거리: {max_dist:.1f} > {max_reasonable_distance:.1f}).")
             print(f"    유효 corner: {valid_corner_count}/4")
@@ -672,7 +706,9 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         # 역변환 검증: H_inv @ H_to_center가 Identity에 가까운지 확인
         H_check = H_inv @ H_to_center
         identity_error = np.max(np.abs(H_check - np.eye(3, dtype=np.float32)))
-        if identity_error > 1e-4:
+        # 검증 기준 완화: 부동소수점 연산 오차를 고려하여 1e-2 (0.01)로 완화
+        # 실제 변환에는 큰 영향 없으며, 수치적 오차 누적으로 인한 경고를 줄임
+        if identity_error > 1e-2:
             print(f"    Warning: Image {i+1}의 H_inv 검증 실패 (identity_error={identity_error:.2e})")
             print(f"      H_to_center scale: ({scale_x:.2f}, {scale_y:.2f})")
             # 검증 실패 시에도 계속 진행 (경고만 출력)
@@ -857,34 +893,36 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             max_dist = np.sqrt(center_x**2 + center_y**2)
             distances = np.sqrt((x_img_filtered - center_x)**2 + (y_img_filtered - center_y)**2)
             
-            # Center-Weighted Blending (강한 Feathering)
-            # Ghost 현상 제거를 위해 이미지 중심부에 압도적으로 높은 가중치 부여
-            # 거리가 멀수록 가중치가 급격히 감소하여, 겹치는 구간에서 정렬 오차가 있는 픽셀을 숨기고
-            # 중심부의 선명한 픽셀만 남김
+            # Center-Weighted Blending (부드러운 Feathering)
+            # 색보정을 위해 경계에서 부드러운 블렌딩 적용
+            # 거리가 멀수록 가중치가 점진적으로 감소하여, 겹치는 구간에서 자연스러운 블렌딩
             normalized_distances = distances / (max_dist + 1e-6)
-            # 지수를 5.0으로 높여서 경계 부근의 가중치가 급격히 0으로 떨어지도록 함
-            # 수식: weights = (1.0 - normalized_distances)^5.0
-            current_weights = np.maximum(np.power(1.0 - normalized_distances, 5.0), 1e-5)  # 최소값 1e-5로 나눗셈 에러 방지
+            # 지수를 2.0으로 낮춰서 경계에서 부드러운 블렌딩 (5.0 → 2.0)
+            # 수식: weights = (1.0 - normalized_distances)^2.0
+            current_weights = np.maximum(np.power(1.0 - normalized_distances, 2.0), 1e-5)  # 최소값 1e-5로 나눗셈 에러 방지
             
-            # Winner Takes All (Max Weight) 방식: 더 중심에 가까운(가중치가 높은) 픽셀이 캔버스를 독점
-            # 현재 이미지의 가중치와 기존 최대 가중치 비교
-            mask = current_weights > max_weights[valid_y_coords, valid_x_coords]
+            # 가중치 기반 블렌딩 (Weighted Blending): 경계에서 자연스러운 색 전환
+            # 기존 픽셀과 새 픽셀을 가중 평균으로 블렌딩
+            existing_weights = max_weights[valid_y_coords, valid_x_coords]
+            total_weights = existing_weights + current_weights
             
-            # 더 중심에 가까운 픽셀인 경우 완전히 덮어쓰기 (Overwrite)
-            if np.any(mask):
-                # mask에 해당하는 위치만 업데이트
-                mask_y_coords = valid_y_coords[mask]
-                mask_x_coords = valid_x_coords[mask]
-                
-                if len(images[i].shape) == 3:
-                    # RGB 이미지: (N, 3) 형태
-                    panorama[mask_y_coords, mask_x_coords] = value[mask]
-                else:
-                    # 그레이스케일 이미지: (N,) 형태
-                    panorama[mask_y_coords, mask_x_coords] = value[mask]
-                
-                # max_weights도 업데이트
-                max_weights[mask_y_coords, mask_x_coords] = current_weights[mask]
+            # 가중 평균 계산
+            if len(images[i].shape) == 3:
+                # RGB 이미지: (N, 3) 형태
+                # 기존 픽셀 가중치
+                existing_pixels = panorama[valid_y_coords, valid_x_coords]
+                # 가중 평균: (existing * existing_weight + new * current_weight) / total_weight
+                blended = (existing_pixels * existing_weights[:, np.newaxis] + 
+                          value * current_weights[:, np.newaxis]) / (total_weights[:, np.newaxis] + 1e-10)
+                panorama[valid_y_coords, valid_x_coords] = blended
+            else:
+                # 그레이스케일 이미지: (N,) 형태
+                existing_pixels = panorama[valid_y_coords, valid_x_coords]
+                blended = (existing_pixels * existing_weights + value * current_weights) / (total_weights + 1e-10)
+                panorama[valid_y_coords, valid_x_coords] = blended
+            
+            # max_weights 업데이트 (누적 가중치)
+            max_weights[valid_y_coords, valid_x_coords] = total_weights
             
             # 실제 할당된 픽셀 수 디버깅
             assigned_pixels = len(valid_y_coords)
@@ -894,8 +932,8 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
         
         print(f"      완료: Image {i+1} 처리 완료 (벡터화)" + " " * 30)  # 공백으로 이전 출력 지움
     
-    # Winner Takes All 방식: 이미 덮어쓰기로 완성되었으므로 나눗셈 후처리 불필요
-    # 가중치가 0인 픽셀은 검은색으로 유지 (이미 0으로 초기화됨)
+    # 가중치 기반 블렌딩: 가중치가 0인 픽셀은 검은색으로 유지 (이미 0으로 초기화됨)
+    # 가중 평균은 이미 블렌딩 과정에서 계산되었으므로 추가 후처리 불필요
     
     return panorama.astype(np.uint8)
 

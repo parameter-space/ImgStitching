@@ -18,6 +18,7 @@ from homography import compute_homography_dlt, compute_homography_affine, interp
 from ransac import ransac_homography
 from stitching import stitch_multiple_images
 from preprocessing import preprocess_image
+from tone_mapping import tone_map_images
 
 
 def filter_by_spatial_distribution(image1: np.ndarray,
@@ -127,10 +128,10 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     gray1_norm = normalize_image(gray1)
     gray2_norm = normalize_image(gray2)
     
-    # 4. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 증가)
+    # 4. 코너 포인트 찾기 (민감도 향상: threshold를 낮춰서 코너 개수 2~3배 증가)
     corners1 = harris_corner_detection(
         gray1_norm,
-        threshold=0.0005,  # 0.001 -> 0.0005로 더 낮춤 (코너 개수 증가)
+        threshold=0.001,  # 0.01 -> 0.001로 낮춤
         k=0.04,
         window_size=3,
         sigma=1.0
@@ -138,7 +139,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     corners2 = harris_corner_detection(
         gray2_norm,
-        threshold=0.0005,  # 0.001 -> 0.0005로 더 낮춤 (코너 개수 증가)
+        threshold=0.001,  # 0.01 -> 0.001로 낮춤
         k=0.04,
         window_size=3,
         sigma=1.0
@@ -157,7 +158,7 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     # 5. Feature Matching (threshold 완화하여 더 많은 후보 확보)
     # 공간 분산을 위해 약간 완화된 threshold 사용
-    matches = match_features(descriptors1, descriptors2, threshold=0.8)  # 0.75 -> 0.8로 완화
+    matches = match_features(descriptors1, descriptors2, threshold=0.75)
     print(f"  Matched features: {len(matches)}")
     
     if len(matches) < 4:
@@ -180,13 +181,13 @@ def compute_pairwise_homography(image1: np.ndarray, image2: np.ndarray) -> np.nd
     
     # 7. RANSAC을 사용하여 Outlier 제거 및 Homography 계산
     # image1 -> image2 변환 Homography 계산
-    # min_inliers를 동적으로 조정: 매칭 개수의 25% 또는 최소 4개 (30% -> 25%로 완화)
-    min_inliers = max(4, int(len(matches) * 0.25))
+    # min_inliers를 동적으로 조정: 매칭 개수의 30% 또는 최소 4개
+    min_inliers = max(4, int(len(matches) * 0.3))
     
     H_1to2, inlier_mask = ransac_homography(
         points1, points2,
         max_iterations=2000,
-        threshold=7.0,  # 5.0 -> 7.0으로 더 완화하여 Inlier 개수 증가
+        threshold=5.0,  # 3.0 -> 5.0으로 완화하여 Inlier 개수 증가
         min_inliers=min_inliers
     )
     
@@ -427,19 +428,32 @@ def main():
     print(f"로드된 이미지 개수: {len(images)}")
     print()
     
-    # 1.5. Tone Mapping 적용 (옵션)
-    USE_TONE_MAPPING = True  # False로 설정하면 기존 동작
+    # 2. Tone Mapping 적용 (노출 차이 및 색감 차이 조정)
+    print("Tone Mapping 적용 중...")
+    # 방법 선택:
+    # - "zscore": Z-score 정규화 (요구사항 구현, 밝기 보정만)
+    # - "zscore_ratio": Z-score + 채널 비율 보정 (색온도 보정 포함)
+    # - "lab": LAB 색공간 기반 보정 (색온도/색조 보정)
+    # - "zscore_lab": Z-score + LAB 보정 결합 (최고 품질, 경계 색보정 개선)
+    # - "histogram": 히스토그램 매칭 (색감 보정, 경계 색보정 개선)
+    tone_mapping_method = "histogram"  # 경계 색보정 개선을 위해 "histogram" 또는 "zscore_lab" 사용
+    images_tone_mapped = tone_map_images(images, method=tone_mapping_method)
     
-    if USE_TONE_MAPPING:
-        from tone_mapping import normalize_image_brightness_rgb
-        images = normalize_image_brightness_rgb(images)
+    # float32 0~1 범위를 uint8 0~255로 변환 (기존 파이프라인과 호환)
+    images_for_processing = []
+    for img_float in images_tone_mapped:
+        img_uint8 = (np.clip(img_float, 0.0, 1.0) * 255.0).astype(np.uint8)
+        images_for_processing.append(img_uint8)
     
-    # 2. 모든 인접 이미지 쌍에 대해 Homography 계산
-    homographies = compute_all_homographies(images)
+    print(f"Tone Mapping 완료 (방법: {tone_mapping_method})")
+    print()
     
-    # 3. 이미지 스티칭
+    # 3. 모든 인접 이미지 쌍에 대해 Homography 계산
+    homographies = compute_all_homographies(images_for_processing)
+    
+    # 4. 이미지 스티칭
     print("파노라마 이미지 생성 중...")
-    panorama = stitch_multiple_images(images, homographies)
+    panorama = stitch_multiple_images(images_for_processing, homographies)
     
     if panorama is None:
         print("스티칭 실패")
@@ -449,7 +463,7 @@ def main():
         print("스티칭 실패: panorama 크기가 유효하지 않습니다")
         return
     
-    # 4. 결과 저장 및 표시
+    # 5. 결과 저장 및 표시
     output_path = "result.jpg"
     try:
         save_image(panorama, output_path)
