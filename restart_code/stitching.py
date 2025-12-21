@@ -929,10 +929,28 @@ def stitch_multiple_images(images: list, homographies: list) -> np.ndarray:
             # 경계 영역과 중심부에 따라 다른 지수 적용
             boundary_weights = np.power(1.0 - normalized_distances, boundary_exp)
             center_weights = np.power(1.0 - normalized_distances, center_exp)
-            current_weights = np.maximum(
+            base_weights = np.maximum(
                 np.where(is_boundary, boundary_weights, center_weights),
                 1e-5  # 최소값 1e-5로 나눗셈 에러 방지
             )
+            
+            # 경계 영역에서 거리 기반 가중치 보정 (이미지 가장자리): Ghost 현상 추가 감소
+            # 이미지 가장자리까지의 거리를 고려하여 가중치 추가 보정
+            # 가장자리에 가까울수록 가중치를 더 빠르게 감소
+            if np.any(is_boundary):
+                # 이미지 가장자리까지의 거리 계산
+                edge_dist_x = np.minimum(x_img_filtered, W_img - x_img_filtered)
+                edge_dist_y = np.minimum(y_img_filtered, H_img - y_img_filtered)
+                edge_dist = np.minimum(edge_dist_x, edge_dist_y)
+                normalized_edge_dist = edge_dist / (min(W_img, H_img) / 2.0 + 1e-6)
+                
+                # 경계 영역에서만 가장자리 거리 기반 보정 적용
+                # 가장자리에 가까울수록 가중치 감소 (지수 0.3)
+                boundary_correction = np.power(normalized_edge_dist, 0.3)
+                # 경계 영역에서만 보정 적용, 중심부는 보정 없음
+                current_weights = base_weights * np.where(is_boundary, boundary_correction, 1.0)
+            else:
+                current_weights = base_weights
             
             # 가중치 기반 블렌딩 (Weighted Blending): 경계에서 자연스러운 색 전환
             # 기존 픽셀과 새 픽셀을 가중 평균으로 블렌딩

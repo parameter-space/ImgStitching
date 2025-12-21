@@ -407,7 +407,7 @@ def main():
     """
     # 1. 이미지 로드
     # 사용자가 사용할 sampleset 폴더 이름을 여기에 지정하세요
-    sampleset_folder_name = "sampleset3"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
+    sampleset_folder_name = "sampleset1"  # sampleset0, sampleset1, sampleset2 등으로 변경 가능
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
